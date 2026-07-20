@@ -58,5 +58,5 @@ def run_lm_eval(model_id_or_path: str, tasks: list[str], **kw):  # pragma: no co
     from bite.models.loader import load_teacher, load_tokenizer
 
     model = load_teacher(model_id_or_path)
-    lm = HFLM(pretrained=model, tokenizer=load_tokenizer(model_id_or_path))
+    lm = HFLM(pretrained=model, tokenizer=load_tokenizer(model_id_or_path), batch_size="auto")
     return simple_evaluate(model=lm, tasks=tasks, **kw)
