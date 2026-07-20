@@ -47,10 +47,12 @@ uv pip install --python .venv/bin/python torch numpy pyyaml pytest
 
 See [`docs/stage0_findings.md`](docs/stage0_findings.md). Architecture conversion is supported
 (the llama.cpp org itself publishes a `qwen3_5_moe` GGUF); export splits into LM + vision
-`mmproj` + MTP drafter; the mainline sub-2-bit target is **`Q2_0` @ group-64** (so
-`quant.group_size: 64`); no sub-2-bit build exists for this model yet (novel); and binary has
-no mainline runtime type (ternary ships, binary stays a fake-quant research result).
-`scripts/stage0_spike.py` runs the empirical `Q2_0` round-trip on the runner.
+`mmproj` + MTP drafter; and no sub-2-bit build exists for this model yet (novel). **Runtime
+target: the PrismML fork** (`PrismML-Eng/llama.cpp @ prism`), whose g128 **`Q2_0` (ternary) and
+`Q1_0` (binary)** both run on CUDA/Metal/CPU/Vulkan + DSpark — so `quant.group_size: 128` and
+**1-bit is a shippable, runnable target** (mainline has no binary type). Caveat: no Bonsai MoE
+exists, so the 256-expert path at 1-bit is unexercised — `scripts/stage0_spike.py` runs the
+empirical `Q2_0`/`Q1_0` round-trip on a fork build to validate it.
 
 ## Cloud stages (HF Pro hub + pay-as-you-go H200)
 

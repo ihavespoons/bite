@@ -1,5 +1,5 @@
-# Binary {-1,+1} g128 — the 1-bit stretch goal (~1.125 bpw). Re-init from the healed
-# ternary checkpoint; fall back to expert-level mixed precision if it collapses.
+# Binary {-1,+1} g128 — the 1-bit goal (~1.125 bpw), shippable as the fork's Q1_0. Re-init
+# from the healed ternary checkpoint; fall back to expert-level mixed precision if it collapses.
 defaults: base.yaml
 quant:
   mode: binary

@@ -1,21 +1,22 @@
 #!/usr/bin/env python
 """Stage 0 feasibility spike: prove the sub-2-bit GGUF round-trip for qwen3_5_moe.
 
-The desk-research portion is already settled (see ``docs/stage0_findings.md``):
-architecture conversion is supported (ggml-org and others publish GGUFs), the mainline
-sub-2-bit ternary target is **Q2_0 at group-64** (not g128), and there is no mainline
-binary type. This script empirically confirms the remaining unknown on the cloud runner:
-that ``llama-quantize`` can produce a **Q2_0** build for this MoE arch (including the routed
-expert tensors) and that it loads and generates coherently.
+The desk-research portion is settled (see ``docs/stage0_findings.md``): architecture
+conversion is supported, and the runtime target is the **PrismML fork** (`PrismML-Eng/
+llama.cpp @ prism`) whose **Q2_0 (ternary) and Q1_0 (binary) are g128** — both runnable, incl.
+on Hopper (H200). This script empirically confirms the remaining unknown: that the fork's
+``llama-quantize`` produces a working ``Q2_0``/``Q1_0`` build for this **256-expert MoE**
+(the routed expert 3D tensors — never exercised at 1-bit on a Bonsai MoE) that loads and
+generates coherently.
 
-Runner-side; needs a built llama.cpp and the model. Pure stdlib so ``--help`` and arg
-parsing work anywhere.
+**Use a fork build**, not stock llama.cpp: g128 Q1_0/Q2_0 do not load on mainline. Runner-side;
+pure stdlib so ``--help`` and arg parsing work anywhere.
 
-Example:
+Example (test both the ternary and binary blocks):
     python scripts/stage0_spike.py \
-        --llama-cpp ~/llama.cpp/build/bin \
+        --llama-cpp ~/PrismML-llama.cpp/build/bin \
         --bf16-gguf ggml-org/Qwen3.6-35B-A3B-GGUF/Qwen3.6-35B-A3B-BF16.gguf \
-        --work-dir outputs/stage0
+        --qtype Q2_0   # then re-run with --qtype Q1_0
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-GATE = "Q2_0"  # mainline group-64 ternary-capable type (see docs/stage0_findings.md)
+GATE = "Q2_0"  # fork g128 ternary (Q1_0 = g128 binary); see docs/stage0_findings.md
 EXPERT_TENSOR_HINT = "ffn_"  # MoE expert tensors we most need to confirm quantize cleanly
 
 
@@ -70,9 +71,9 @@ def main() -> None:
     print("\n=== Stage 0 gate ===")
     print(f"type={args.qtype}  size={size_gb:.2f} GB  bytes/param≈{size_gb*1e9/35.95e9*8:.3f} bpw")
     ok = len(produced) > 40
-    print("PASS: Q2_0 round-trip generated coherent text" if ok else "FAIL: empty/short generation")
-    print("gate ->", "GO (train, then export to this type)" if ok
-          else "NO-GO (contribute converter or use fake-quant eval harness)")
+    print(f"PASS: {args.qtype} round-trip generated coherent text" if ok else "FAIL: empty/short generation")
+    print("gate ->", "GO (train, then export to this type on the fork)" if ok
+          else "NO-GO (fix fork MoE expert quant, or use the fake-quant eval harness)")
     sys.exit(0 if ok else 1)
 
 

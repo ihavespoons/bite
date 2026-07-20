@@ -1,12 +1,15 @@
-"""Export healed low-bit weights to GGUF for llama.cpp / bitnet.cpp.
+"""Export healed low-bit weights to GGUF for the PrismML llama.cpp fork.
 
-Ternary -> ``TQ1_0``/``TQ2_0``; binary -> 1-bit ``g128``. The **Stage 0 feasibility spike**
-must confirm that ``convert_hf_to_gguf.py`` understands the Qwen3.6 hybrid (Gated DeltaNet +
-MoE) architecture and that these low-bit quant types round-trip for it; if not, we either
-contribute the converter or fall back to the in-framework fake-quant eval harness.
+Runtime target (Stage 0 finding #6): ``PrismML-Eng/llama.cpp @ prism``, whose **g128** blocks
+match our scheme exactly — **ternary -> ``Q2_0``** (2.125 bpw), **binary -> ``Q1_0``** (1.125
+bpw) — and which runs on CUDA (Hopper/H200), Metal, x86 and Vulkan with a DSpark drafter. The
+fork's quantize already handles 3D MoE expert tensors and keeps expert gating high-precision;
+the open risk the Stage 0 spike validates is this path on a **256-expert** MoE (never exercised
+at 1-bit) plus overriding the stock ``n_expert>=4 -> Q4_K`` auto-bump for a true end-to-end
+low-bit export.
 
 This module packs a :class:`QuantLinear` into codes + FP16 group scales (the on-disk layout);
-wiring those tensors into a GGUF writer for this specific architecture is the runner-side step.
+wiring those tensors into a fork GGUF writer for this architecture is the runner-side step.
 """
 
 from __future__ import annotations

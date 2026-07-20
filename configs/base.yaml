@@ -11,9 +11,9 @@ moe:
 
 quant:
   mode: ternary          # ternary | binary
-  # group_size 64 aligns with mainline llama.cpp Q2_0 so healed == shipped (Stage 0 finding
-  # #3; ggerganov rejected g128). Use 128 for a research-optimal run + export re-quant.
-  group_size: 64         # FP16 scale per group
+  # g128 matches the PrismML fork's Q2_0 (ternary) and Q1_0 (binary) blocks, so healed ==
+  # shipped and 1-bit is runnable (Stage 0 finding #6). Mainline-only runs would use g64.
+  group_size: 128        # FP16 scale per group
   clip_ste: false
   ternary_threshold: null  # null = BitNet absmean; float = TWN threshold ratio
 
@@ -47,6 +47,9 @@ vision:
 
 export:
   out_dir: outputs/gguf
-  format: Q2_0           # mainline group-64 ternary target (Stage 0 finding #3)
-  # binary has no mainline GGUF type -> eval via fake-quant harness, not llama.cpp (finding #5)
-  components: [lm, mmproj, mtp]   # LM low-bit + vision mmproj + optional MTP drafter (finding #2)
+  runtime: prism-fork    # PrismML-Eng/llama.cpp @ prism; g128 Q1_0/Q2_0 (Stage 0 finding #6)
+  gguf_type: { ternary: Q2_0, binary: Q1_0 }   # both run on the fork (CUDA/Metal/CPU/Vulkan)
+  components: [lm, mmproj, mtp]   # LM low-bit + vision mmproj + MTP/DSpark drafter (finding #2)
+  # the fork's stock quantize auto-bumps some tensors to Q4_K when n_expert>=4; override to
+  # hold the end-to-end low-bit target (no high-precision escape hatch) — validate in Stage 0 spike
+  end_to_end_lowbit: true
