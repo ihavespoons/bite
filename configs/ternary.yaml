@@ -1,0 +1,4 @@
+# Ternary {-1,0,+1} g128 — the de-risking milestone (~1.71 bpw). Target: >=93% of FP16.
+defaults: base.yaml
+quant:
+  mode: ternary

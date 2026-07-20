@@ -1,0 +1,47 @@
+# Shared defaults. ternary.yaml / binary.yaml override `quant.mode`.
+model:
+  id: Qwen/Qwen3.6-35B-A3B
+  dtype: bfloat16
+  device_map: auto
+
+moe:
+  num_experts: 256
+  routed_experts: 8      # + 1 shared
+  # keep router gate + shared expert in higher precision (see bite/quant/policy.py)
+
+quant:
+  mode: ternary          # ternary | binary
+  group_size: 128        # g128, FP16 scale per group
+  clip_ste: false
+  ternary_threshold: null  # null = BitNet absmean; float = TWN threshold ratio
+
+calibration:
+  dataset: null          # HF dataset id for the expert-balanced calib set
+  tokens: 2_000_000
+  oversample_tail: true  # oversample rarely-fired experts
+
+ptq:
+  percdamp: 0.01
+
+qad:
+  schedule: blockwise    # blockwise | end_to_end
+  teacher_topk: 64       # precomputed teacher logits kept per token
+  temperature: 1.0
+  tokens: 1_500_000_000  # ~1.5B; scale only if the eval curve is still climbing
+  optimizer: adam8bit    # end_to_end polish uses bitsandbytes 8-bit optimizer
+  lr: 1.0e-4
+  loss_weights: { kl: 1.0, hidden: 1.0, ce: 0.5 }
+  distill_router: true
+  freeze_router: true
+
+eval:
+  tasks: [gsm8k, mmlu, humaneval, ifeval]   # + brittle-collapse probes
+  teacher_baseline: null  # filled by run_baseline
+
+vision:
+  quantize: true
+  nbits: 4               # HQQ
+  group_size: 64
+
+export:
+  out_dir: outputs/gguf

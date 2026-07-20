@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bite"
+version = "0.0.1"
+description = "Extreme (1-bit/ternary) quantization pipeline for MoE LLMs (Qwen3.6-35B-A3B)"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "torch>=2.4",
+    "numpy>=1.26",
+    "pyyaml>=6.0",
+]
+
+# GPU / model stages are installed on the cloud runner, not needed for the CPU-testable core.
+[project.optional-dependencies]
+model = [
+    "transformers>=4.57",
+    "accelerate>=1.0",
+    "safetensors>=0.4",
+    "datasets>=3.0",
+]
+train = [
+    "deepspeed>=0.15",
+    "bitsandbytes>=0.44",  # 8-bit optimizer for the end-to-end polish pass
+]
+eval = ["lm-eval>=0.4"]
+export = ["hqq>=0.2"]  # 4-bit vision tower
+dev = ["pytest>=8.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["bite"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
