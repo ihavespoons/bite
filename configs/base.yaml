@@ -39,7 +39,9 @@ qad:
   freeze_router: true
 
 eval:
-  tasks: [gsm8k, mmlu, humaneval, ifeval]   # + brittle-collapse probes
+  # humaneval dropped: broken in current lm-eval (humaneval/utils.py missing pass_at_k).
+  # Add a code benchmark (mbpp / fixed lm-eval) later. These 3 need no code execution.
+  tasks: [gsm8k, mmlu, ifeval]              # reasoning / knowledge / instruction-following
   teacher_baseline: null  # filled by run_baseline
 
 vision:
