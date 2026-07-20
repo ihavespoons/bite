@@ -46,7 +46,17 @@ def retained_fraction(quantized_score: float, teacher_score: float) -> float:
 
 
 def run_lm_eval(model_id_or_path: str, tasks: list[str], **kw):  # pragma: no cover - runner
-    """Wrapper around ``lm-eval`` for the fixed benchmark suite. Runs on the cloud runner."""
-    from lm_eval import simple_evaluate
+    """Text-benchmark suite via ``lm-eval``, robust to the multimodal model class.
 
-    return simple_evaluate(model="hf", model_args=f"pretrained={model_id_or_path}", tasks=tasks, **kw)
+    Loads the model with our multimodal-aware loader and wraps it in an ``HFLM`` instance, so
+    ``lm-eval`` evaluates the already-loaded model instead of re-loading it with the default
+    ``AutoModelForCausalLM`` (which may not resolve ``...ForConditionalGeneration``).
+    """
+    from lm_eval import simple_evaluate
+    from lm_eval.models.huggingface import HFLM
+
+    from bite.models.loader import load_teacher, load_tokenizer
+
+    model = load_teacher(model_id_or_path)
+    lm = HFLM(pretrained=model, tokenizer=load_tokenizer(model_id_or_path))
+    return simple_evaluate(model=lm, tasks=tasks, **kw)

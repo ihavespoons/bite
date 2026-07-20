@@ -34,7 +34,8 @@ gate + always-on shared expert in higher precision.
 | `bite/train/qad.py` | QAD losses + combined objective | ✅ built + tested |
 | `bite/train/blockwise.py` | block discovery, per-block distill, optimizer | ◐ engine tested, orchestration runner |
 | `bite/eval/harness.py` | brittle-collapse probes (tested) + lm-eval (runner) | ◐ probes tested |
-| `bite/models/loader.py`, `bite/export/*` | model load / GGUF / vision HQQ | ○ runner-side scaffold |
+| `bite/models/loader.py` | multimodal load + vision-excluded LM swap | ◐ scoping tested |
+| `bite/export/*` | GGUF (fork) / vision HQQ | ○ runner-side scaffold |
 
 `✅` unit-tested on CPU · `◐` pure-function parts tested, GPU parts scaffolded · `○` runner-side.
 

@@ -85,6 +85,10 @@ def _set_submodule(root: nn.Module, dotted: str, new: nn.Module) -> None:
     setattr(parent, last, new)
 
 
+def _is_excluded(name: str, exclude_prefixes: tuple[str, ...]) -> bool:
+    return any(name == p or name.startswith(p + ".") for p in exclude_prefixes)
+
+
 def swap_linears(
     model: nn.Module,
     policy: PrecisionPolicy,
@@ -92,16 +96,17 @@ def swap_linears(
     group_size: int = 128,
     threshold_ratio: float | None = None,
     clip_ste: bool = False,
+    exclude_prefixes: tuple[str, ...] = (),
 ) -> dict[str, str]:
     """Replace policy-selected :class:`nn.Linear` modules with :class:`QuantLinear`.
 
     Returns a mapping ``{module_name: mode}`` for the swapped modules (for logging/tests).
-    Modules the policy resolves to ``keep`` — and every non-Linear module — are left
-    untouched.
+    Modules the policy resolves to ``keep``, anything under ``exclude_prefixes`` (e.g. the
+    vision tower, held at 4-bit), and every non-Linear module are left untouched.
     """
     targets: list[tuple[str, nn.Linear, str]] = []
     for name, module in model.named_modules():
-        if isinstance(module, nn.Linear):
+        if isinstance(module, nn.Linear) and not _is_excluded(name, exclude_prefixes):
             mode = policy.resolve(name)
             if mode != KEEP:
                 targets.append((name, module, mode))

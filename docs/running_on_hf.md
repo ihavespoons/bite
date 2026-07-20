@@ -57,9 +57,11 @@ hf jobs run --flavor h200 --timeout 6h --secrets HF_TOKEN=$HF_TOKEN \
 Start with **one small task** first (edit `eval.tasks` to e.g. `[gsm8k]`) to confirm the model loads
 and scores, then scale to the full suite.
 
-**Known wrinkle to expect:** `Qwen3.6-35B-A3B` is a multimodal `...ForConditionalGeneration`. `lm-eval`'s
-default `hf` loader (AutoModelForCausalLM) may need `trust_remote_code`, the `hf-multimodal` model
-type, or loading the text sub-model. This is the first thing Run 3 will surface — expected, not a bug.
+**Multimodal loading is handled:** `Qwen3.6-35B-A3B` is a multimodal `...ForConditionalGeneration`, so
+`bite.models.loader` loads it with `AutoModelForImageTextToText` + `trust_remote_code`, the low-bit
+swap **excludes the vision tower** (`swap_language_model`), and `run_lm_eval` wraps the loaded model in
+an `HFLM` so `lm-eval` doesn't re-load it with the wrong auto-class. If the exact processor/tokenizer
+path differs on the runner, that's the one spot to adjust.
 
 ## Managing jobs
 
