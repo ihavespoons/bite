@@ -43,6 +43,15 @@ uv pip install --python .venv/bin/python torch numpy pyyaml pytest
 .venv/bin/python -m pytest -q
 ```
 
+## Stage 0 — feasibility: **GO** ✅
+
+See [`docs/stage0_findings.md`](docs/stage0_findings.md). Architecture conversion is supported
+(the llama.cpp org itself publishes a `qwen3_5_moe` GGUF); export splits into LM + vision
+`mmproj` + MTP drafter; the mainline sub-2-bit target is **`Q2_0` @ group-64** (so
+`quant.group_size: 64`); no sub-2-bit build exists for this model yet (novel); and binary has
+no mainline runtime type (ternary ships, binary stays a fake-quant research result).
+`scripts/stage0_spike.py` runs the empirical `Q2_0` round-trip on the runner.
+
 ## Cloud stages (HF Pro hub + pay-as-you-go H200)
 
 Inference-shaped stages run on **ZeroGPU** (single H200 141GB holds the 35B in bf16, free in

@@ -11,7 +11,9 @@ moe:
 
 quant:
   mode: ternary          # ternary | binary
-  group_size: 128        # g128, FP16 scale per group
+  # group_size 64 aligns with mainline llama.cpp Q2_0 so healed == shipped (Stage 0 finding
+  # #3; ggerganov rejected g128). Use 128 for a research-optimal run + export re-quant.
+  group_size: 64         # FP16 scale per group
   clip_ste: false
   ternary_threshold: null  # null = BitNet absmean; float = TWN threshold ratio
 
@@ -45,3 +47,6 @@ vision:
 
 export:
   out_dir: outputs/gguf
+  format: Q2_0           # mainline group-64 ternary target (Stage 0 finding #3)
+  # binary has no mainline GGUF type -> eval via fake-quant harness, not llama.cpp (finding #5)
+  components: [lm, mmproj, mtp]   # LM low-bit + vision mmproj + optional MTP drafter (finding #2)
