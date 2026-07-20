@@ -27,7 +27,7 @@ train = [
     "deepspeed>=0.15",
     "bitsandbytes>=0.44",  # 8-bit optimizer for the end-to-end polish pass
 ]
-eval = ["lm-eval>=0.4"]
+eval = ["lm-eval>=0.4", "typing_extensions>=4.13"]  # 4.13 for PEP 728 extra_items on py<3.13
 export = ["hqq>=0.2"]  # 4-bit vision tower
 dev = ["pytest>=8.0"]
 
