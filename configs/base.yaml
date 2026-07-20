@@ -27,6 +27,8 @@ ptq:
 
 qad:
   schedule: blockwise    # blockwise | end_to_end
+  layers_path: null      # dotted path to the decoder ModuleList; null = auto-detect longest
+  block_steps: 200       # optimizer steps per block in the block-wise pass
   teacher_topk: 64       # precomputed teacher logits kept per token
   temperature: 1.0
   tokens: 1_500_000_000  # ~1.5B; scale only if the eval curve is still climbing

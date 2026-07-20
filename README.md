@@ -31,7 +31,8 @@ gate + always-on shared expert in higher precision.
 | `bite/moe/calibration.py` | expert coverage + router hooks + tail balancing | ✅ built + tested |
 | `bite/moe/router.py` | router freeze + distillation | ✅ built + tested |
 | `bite/train/teacher.py` | top-k teacher-logit precompute | ◐ extractor tested |
-| `bite/train/qad.py` | QAD losses (tested) + block-wise loop (runner) | ◐ losses tested |
+| `bite/train/qad.py` | QAD losses + combined objective | ✅ built + tested |
+| `bite/train/blockwise.py` | block discovery, per-block distill, optimizer | ◐ engine tested, orchestration runner |
 | `bite/eval/harness.py` | brittle-collapse probes (tested) + lm-eval (runner) | ◐ probes tested |
 | `bite/models/loader.py`, `bite/export/*` | model load / GGUF / vision HQQ | ○ runner-side scaffold |
 

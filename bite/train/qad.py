@@ -76,19 +76,11 @@ def qad_loss(
     return total, {k: float(v.detach()) for k, v in parts.items()}
 
 
-# --- cloud-runner training loop (lazy heavy imports; not exercised by CPU tests) ---
+# --- cloud-runner training loop (delegates to the block-wise engine) ---
 
 
 def run_blockwise_qad(config: dict) -> None:  # pragma: no cover - requires model + GPU
-    """Block-wise QAD entrypoint. See ``scripts/run_qad.py`` and ``configs/*.yaml``.
+    """Block-wise QAD entrypoint — see :func:`bite.train.blockwise.run_blockwise_qad`."""
+    from bite.train.blockwise import run_blockwise_qad as _run
 
-    Steps (executed on the H200 runner):
-      1. load student (swapped via :func:`bite.quant.quantlinear.swap_linears`) + PTQ init,
-      2. stream calibration/QAD batches; per block, minimize :func:`qad_loss` against the
-         precomputed teacher targets while an 8-bit optimizer updates that block's latent
-         weights (and, if enabled, distills router logits via :mod:`bite.moe.router`),
-      3. checkpoint each healed block; evaluate with :mod:`bite.eval.harness`.
-    """
-    raise NotImplementedError(
-        "run on the cloud runner via scripts/run_qad.py; see module docstring for the schedule"
-    )
+    _run(config)

@@ -22,6 +22,14 @@ def topk_teacher_logits(logits: Tensor, k: int = 64) -> tuple[Tensor, Tensor]:
     return values, indices
 
 
+def load_teacher_shard(path: str) -> tuple[Tensor, Tensor]:  # pragma: no cover - runner-side I/O
+    """Load a precomputed shard back as ``(values, indices)`` for the QAD loss."""
+    import safetensors.torch as st
+
+    d = st.load_file(path)
+    return d["values"], d["indices"]
+
+
 def precompute_teacher_logits(  # pragma: no cover - runner-side (teacher + data)
     teacher,
     batches,
