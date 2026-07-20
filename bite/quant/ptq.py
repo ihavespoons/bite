@@ -80,3 +80,35 @@ def gptq_quantize(
         W[:, i + 1 :] -= err.unsqueeze(1) * hinv[i, i + 1 :].unsqueeze(0)
 
     return Q.to(dtype), scales.to(dtype)
+
+
+def ptq_init_model(
+    model,
+    hessians: dict | None = None,
+    *,
+    percdamp: float = 0.01,
+) -> dict[str, int]:
+    """PTQ-initialize every :class:`QuantLinear`'s latent weight to its GPTQ grid point.
+
+    Sets ``module.weight`` to the error-compensated quantized weights so QAD starts near a good
+    low-bit solution. Uses ``hessians[name]`` when present (a :class:`HessianCollector`'s ``H``),
+    else the identity (naive rounding). The first fake-quant forward re-quantizes these on-grid
+    weights near-idempotently; QAD heals the small residual. Returns ``{name: cols_quantized}``.
+    """
+    from bite.quant.quantlinear import QuantLinear  # local to avoid an import cycle
+
+    hessians = hessians or {}
+    done: dict[str, int] = {}
+    for name, module in model.named_modules():
+        if not isinstance(module, QuantLinear):
+            continue
+        w_hat, _ = gptq_quantize(
+            module.weight.data,
+            hessians.get(name),
+            mode=module.mode,
+            group_size=module.group_size,
+            percdamp=percdamp,
+        )
+        module.weight.data.copy_(w_hat)
+        done[name] = module.weight.shape[1]
+    return done

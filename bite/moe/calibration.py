@@ -12,7 +12,7 @@ that feeds it is attached on the cloud runner where the real model routes tokens
 from __future__ import annotations
 
 import torch
-from torch import Tensor
+from torch import Tensor, nn
 
 
 class ExpertCoverage:
@@ -62,3 +62,45 @@ class ExpertCoverage:
             "min_frac": round(float(self.fraction().min()), 6),
             "max_frac": round(float(self.fraction().max()), 6),
         }
+
+
+def attach_coverage_hooks(model: nn.Module, coverage: ExpertCoverage) -> list:
+    """Register forward hooks on each MoE router gate so ``coverage`` sees its logits.
+
+    Targets ``nn.Linear`` modules whose name ends in ``gate`` and whose output width equals
+    ``coverage.num_experts`` — i.e. the router, not the expert ``gate_proj`` or attention gates.
+    Returns the hook handles; call ``.remove()`` on each when calibration is done.
+    """
+
+    def make_hook(cov: ExpertCoverage):
+        def hook(_module, _inp, out):
+            logits = out[0] if isinstance(out, tuple) else out
+            cov.update(logits.detach())
+
+        return hook
+
+    handles = []
+    for name, module in model.named_modules():
+        if (
+            isinstance(module, nn.Linear)
+            and name.endswith("gate")
+            and module.out_features == coverage.num_experts
+        ):
+            handles.append(module.register_forward_hook(make_hook(coverage)))
+    return handles
+
+
+def inverse_frequency_weights(counts: Tensor, eps: float = 1.0) -> Tensor:
+    """Per-expert weights ∝ 1/frequency (rarely-fired experts get more weight), mean ≈ 1."""
+    inv = 1.0 / (counts.float() + eps)
+    return inv / inv.mean()
+
+
+def sample_weights(expert_id_lists: list[list[int]], expert_weights: Tensor) -> Tensor:
+    """Weight each calibration sample by the mean inverse-frequency of the experts it fires.
+
+    Feeds an oversampling sampler so the QAD/calibration data covers the long tail of experts.
+    """
+    return torch.stack(
+        [expert_weights[torch.tensor(ids, dtype=torch.long)].mean() for ids in expert_id_lists]
+    )

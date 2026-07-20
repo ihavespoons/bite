@@ -26,9 +26,11 @@ gate + always-on shared expert in higher precision.
 | `bite/quant/fakequant.py` | ternary/binary g128 quantizers + STE | ✅ built + tested |
 | `bite/quant/quantlinear.py` | `QuantLinear` + model-wide module swap | ✅ built + tested |
 | `bite/quant/policy.py` | per-tensor precision policy | ✅ built + tested |
-| `bite/quant/ptq.py` | GPTQ-style ternary/binary PTQ init | ✅ built + tested |
-| `bite/moe/calibration.py` | expert-coverage tracking | ✅ built + tested |
+| `bite/quant/ptq.py` | GPTQ PTQ init + `ptq_init_model` driver | ✅ built + tested |
+| `bite/quant/hessian.py` | activation-Hessian collector for GPTQ | ✅ built + tested |
+| `bite/moe/calibration.py` | expert coverage + router hooks + tail balancing | ✅ built + tested |
 | `bite/moe/router.py` | router freeze + distillation | ✅ built + tested |
+| `bite/train/teacher.py` | top-k teacher-logit precompute | ◐ extractor tested |
 | `bite/train/qad.py` | QAD losses (tested) + block-wise loop (runner) | ◐ losses tested |
 | `bite/eval/harness.py` | brittle-collapse probes (tested) + lm-eval (runner) | ◐ probes tested |
 | `bite/models/loader.py`, `bite/export/*` | model load / GGUF / vision HQQ | ○ runner-side scaffold |
