@@ -45,6 +45,17 @@ def retained_fraction(quantized_score: float, teacher_score: float) -> float:
     return quantized_score / teacher_score
 
 
+def _ensure_nltk() -> None:  # pragma: no cover - runner-side
+    """Fetch the nltk tokenizer data ifeval needs (no-op if already present)."""
+    import nltk
+
+    for pkg in ("punkt", "punkt_tab"):
+        try:
+            nltk.download(pkg, quiet=True)
+        except Exception:  # noqa: BLE001 - best-effort; ifeval will error clearly if truly missing
+            pass
+
+
 def run_lm_eval(model_id_or_path: str, tasks: list[str], **kw):  # pragma: no cover - runner
     """Text-benchmark suite via ``lm-eval``, robust to the multimodal model class.
 
@@ -57,6 +68,7 @@ def run_lm_eval(model_id_or_path: str, tasks: list[str], **kw):  # pragma: no co
 
     from bite.models.loader import load_teacher, load_tokenizer
 
+    _ensure_nltk()  # ifeval tokenizes with nltk punkt at eval time
     model = load_teacher(model_id_or_path)
     lm = HFLM(pretrained=model, tokenizer=load_tokenizer(model_id_or_path), batch_size="auto")
     return simple_evaluate(model=lm, tasks=tasks, **kw)
