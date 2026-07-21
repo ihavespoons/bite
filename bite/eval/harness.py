@@ -77,17 +77,41 @@ def run_lm_eval(
     (formats prompts with the model's chat template) and a larger ``max_gen_toks`` so long CoT
     isn't truncated before the answer — without these the generative scores are artificially low.
     """
+    from bite.models.loader import load_teacher, load_tokenizer
+
+    model = load_teacher(model_id_or_path)
+    return run_lm_eval_model(
+        model,
+        load_tokenizer(model_id_or_path),
+        tasks,
+        batch_size=batch_size,
+        apply_chat_template=apply_chat_template,
+        max_gen_toks=max_gen_toks,
+        **kw,
+    )
+
+
+def run_lm_eval_model(
+    model,
+    tokenizer,
+    tasks: list[str],
+    batch_size: int = 8,
+    apply_chat_template: bool = False,
+    max_gen_toks: int | None = None,
+    **kw,
+):  # pragma: no cover - runner
+    """Same as :func:`run_lm_eval` but for an **already-loaded** model.
+
+    Used to evaluate the in-memory QAD-healed student directly: its fake-quant structure
+    (``QuantLinear`` swaps + expert parametrizations) is only reconstructable by rebuilding the
+    student, so re-loading a saved checkpoint via ``from_pretrained`` would not round-trip it.
+    """
     from lm_eval import simple_evaluate
     from lm_eval.models.huggingface import HFLM
 
-    from bite.models.loader import load_teacher, load_tokenizer
-
     _ensure_nltk()  # ifeval tokenizes with nltk punkt at eval time
-    model = load_teacher(model_id_or_path)
     hflm_kw = {"max_gen_toks": max_gen_toks} if max_gen_toks else {}
-    lm = HFLM(
-        pretrained=model, tokenizer=load_tokenizer(model_id_or_path), batch_size=batch_size, **hflm_kw
-    )
+    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size, **hflm_kw)
     if apply_chat_template:
         kw["apply_chat_template"] = True
         kw.setdefault("fewshot_as_multiturn", True)

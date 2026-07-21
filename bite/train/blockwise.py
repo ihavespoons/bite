@@ -187,6 +187,9 @@ def run_blockwise_qad(  # pragma: no cover - requires model + GPU
     model_id: str | None = None,
     max_seqs: int | None = None,
     max_blocks: int | None = None,
+    steps: int | None = None,
+    eval_tasks: list[str] | None = None,
+    eval_limit: int | None = None,
     out_dir: str = "outputs/qad",
     push_repo: str | None = None,
     skip_save: bool = False,
@@ -219,7 +222,7 @@ def run_blockwise_qad(  # pragma: no cover - requires model + GPU
 
     mid = model_id or config["model"]["id"]
     layers_path = config["qad"].get("layers_path")
-    steps = int(config["qad"].get("block_steps", 200))
+    steps = int(steps if steps is not None else config["qad"].get("block_steps", 200))
     lr = float(config["qad"].get("lr", 1e-4))
     os.makedirs(out_dir, exist_ok=True)
 
@@ -277,17 +280,34 @@ def run_blockwise_qad(  # pragma: no cover - requires model + GPU
     del teacher
     torch.cuda.empty_cache()
 
-    with open(f"{out_dir}/qad_metrics.json", "w") as f:
-        json.dump(metrics, f, indent=2)
-    if not skip_save:
-        student.save_pretrained(f"{out_dir}/student")
-        print(f"saved healed student -> {out_dir}/student")
+    result: dict = {"blocks": metrics}
 
+    # in-job eval on the healed in-memory student (the fake-quant structure doesn't round-trip
+    # through from_pretrained, so evaluate here rather than reloading a checkpoint)
+    if eval_tasks:
+        from bite.eval.harness import run_lm_eval_model
+
+        print(f"evaluating healed student on {eval_tasks} ...")
+        eval_kw = {"limit": eval_limit} if eval_limit else {}
+        res = run_lm_eval_model(
+            student, tokenizer, eval_tasks, batch_size=config["eval"]["batch_size"], **eval_kw
+        )
+        result["eval"] = {t: dict(res["results"].get(t, {})) for t in res.get("results", {})}
+        baseline = (config.get("eval", {}) or {}).get("teacher_baseline") or {}
+        mmlu = res["results"].get("mmlu", {}).get("acc,none")
+        if mmlu is not None:
+            result["mmlu"] = mmlu
+            if baseline.get("mmlu"):
+                result["mmlu_retained"] = mmlu / baseline["mmlu"]
+                print(f"MMLU {mmlu:.4f} vs FP16 {baseline['mmlu']:.4f} -> {result['mmlu_retained']:.1%} retained")
+
+    # secure the (small, critical) metrics before the 70GB checkpoint upload
+    with open(f"{out_dir}/qad_metrics.json", "w") as f:
+        json.dump(result, f, indent=2)
     if push_repo:
         from huggingface_hub import HfApi
 
-        api = HfApi()
-        api.upload_file(
+        HfApi().upload_file(
             path_or_fileobj=f"{out_dir}/qad_metrics.json",
             path_in_repo="qad_metrics.json",
             repo_id=push_repo,
@@ -295,4 +315,21 @@ def run_blockwise_qad(  # pragma: no cover - requires model + GPU
         )
         print(f"uploaded qad_metrics.json -> {push_repo}")
 
-    return metrics
+    if not skip_save:
+        try:
+            student.save_pretrained(f"{out_dir}/student")
+            print(f"saved healed student -> {out_dir}/student")
+            if push_repo:
+                from huggingface_hub import HfApi
+
+                HfApi().upload_folder(
+                    folder_path=f"{out_dir}/student",
+                    path_in_repo="qad_student",
+                    repo_id=push_repo,
+                    repo_type="dataset",
+                )
+                print(f"uploaded healed student -> {push_repo}/qad_student")
+        except Exception as e:  # noqa: BLE001 - metrics already secured; don't lose the run on a save error
+            print(f"WARN: checkpoint save/upload failed ({e}); metrics were persisted")
+
+    return result

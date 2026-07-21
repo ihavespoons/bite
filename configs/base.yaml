@@ -58,7 +58,6 @@ eval:
     gsm8k_flexible: 0.3010
     ifeval_prompt_strict: 0.3401
     ifeval_inst_strict: 0.4724
-  teacher_baseline: null  # filled by run_baseline
 
 vision:
   quantize: true
