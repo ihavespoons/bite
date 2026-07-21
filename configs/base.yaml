@@ -43,6 +43,16 @@ eval:
   # Add a code benchmark (mbpp / fixed lm-eval) later. These 3 need no code execution.
   tasks: [gsm8k, mmlu, ifeval]              # reasoning / knowledge / instruction-following
   batch_size: 8                            # fixed, not "auto": 248K vocab overflows 32-bit index at large batch
+  # FP16 reference from job baseline-v4 (full: datasets/ihavespoons/bite-baseline).
+  # MMLU is the reliable degradation signal (loglikelihood). gsm8k/ifeval are depressed by
+  # eval config (no chat template + generation cap on a thinking model), not true capability
+  # -> re-run generative tasks with apply_chat_template + higher max_gen_toks for a true baseline.
+  teacher_baseline:
+    mmlu: 0.8393
+    gsm8k_strict: 0.2790
+    gsm8k_flexible: 0.3010
+    ifeval_prompt_strict: 0.3401
+    ifeval_inst_strict: 0.4724
   teacher_baseline: null  # filled by run_baseline
 
 vision:
