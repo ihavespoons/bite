@@ -57,7 +57,7 @@ def _load_multimodal(model_id: str, device_map: str):  # pragma: no cover - runn
     from transformers import AutoModelForImageTextToText
 
     return AutoModelForImageTextToText.from_pretrained(
-        model_id, torch_dtype=torch.bfloat16, device_map=device_map, trust_remote_code=True
+        model_id, dtype=torch.bfloat16, device_map=device_map, trust_remote_code=True
     )
 
 
