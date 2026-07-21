@@ -156,7 +156,14 @@ def capture_block_inputs(  # pragma: no cover - requires model + GPU
             if i == 0:
                 grabbed["h0"] = hidden.detach()
             rest = tuple(args[1:]) if args else ()
-            kw = {k: v for k, v in kwargs.items() if k != "hidden_states"}
+            # Drop cache/state kwargs: a threaded KV/recurrent cache is mutated in-place by the
+            # block, which corrupts the autograd graph when we replay the (frozen) inputs for
+            # healing. use_cache=False below also prevents the model from creating one.
+            kw = {
+                k: v
+                for k, v in kwargs.items()
+                if k not in ("hidden_states", "past_key_value", "past_key_values", "use_cache")
+            }
             caps[i] = (rest, kw)
 
         return pre
@@ -164,7 +171,10 @@ def capture_block_inputs(  # pragma: no cover - requires model + GPU
     handles = [b.register_forward_pre_hook(mk(i), with_kwargs=True) for i, b in enumerate(blocks)]
     try:
         with torch.no_grad():
-            model(**batch)
+            try:
+                model(**batch, use_cache=False)
+            except TypeError:
+                model(**batch)  # model forward doesn't take use_cache (e.g. a toy stack)
     finally:
         for h in handles:
             h.remove()
@@ -223,6 +233,8 @@ def run_blockwise_qad(  # pragma: no cover - requires model + GPU
     ptq_init_model(student, hessians=None, percdamp=config["ptq"]["percdamp"])
     ptq_init_experts(student)
     student.eval()
+    if hasattr(student, "config"):
+        student.config.use_cache = False  # stateless forward -> autograd-safe DeltaNet backward
     log = f"student: {len(swapped)} linears + {len(experts)} expert tensors ({config['quant']['mode']})"
     print(log)
 
