@@ -65,28 +65,33 @@ class ExpertCoverage:
 
 
 def attach_coverage_hooks(model: nn.Module, coverage: ExpertCoverage) -> list:
-    """Register forward hooks on each MoE router gate so ``coverage`` sees its logits.
+    """Register hooks on each MoE router so ``coverage`` sees the routing logits.
 
-    Targets ``nn.Linear`` modules whose name ends in ``gate`` and whose output width equals
-    ``coverage.num_experts`` — i.e. the router, not the expert ``gate_proj`` or attention gates.
-    Returns the hook handles; call ``.remove()`` on each when calibration is done.
+    Matches any module named ``...gate`` with a 2-D ``weight`` Parameter of shape
+    ``(num_experts, hidden)`` — covering both a plain ``nn.Linear`` router and Qwen3.5's custom
+    ``Qwen3_5MoeTopKRouter`` (whose ``weight`` uses the same convention). A forward-*pre* hook
+    recomputes the logits ``F.linear(hidden, weight)`` from the input, so it's robust to whatever
+    the router's forward returns. Returns the handles; ``.remove()`` them when calibration ends.
     """
+    import torch.nn.functional as F
 
     def make_hook(cov: ExpertCoverage):
-        def hook(_module, _inp, out):
-            logits = out[0] if isinstance(out, tuple) else out
-            cov.update(logits.detach())
+        def pre_hook(module, args):
+            hidden = args[0].detach()
+            cov.update(F.linear(hidden, module.weight))
 
-        return hook
+        return pre_hook
 
     handles = []
     for name, module in model.named_modules():
+        w = getattr(module, "weight", None)
         if (
-            isinstance(module, nn.Linear)
-            and name.endswith("gate")
-            and module.out_features == coverage.num_experts
+            name.endswith("gate")
+            and isinstance(w, nn.Parameter)
+            and w.dim() == 2
+            and w.shape[0] == coverage.num_experts
         ):
-            handles.append(module.register_forward_hook(make_hook(coverage)))
+            handles.append(module.register_forward_pre_hook(make_hook(coverage)))
     return handles
 
 
