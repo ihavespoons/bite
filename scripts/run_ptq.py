@@ -23,9 +23,13 @@ def main() -> None:  # pragma: no cover - runner-side
     ap.add_argument("--max-seqs", type=int, default=None, help="cap calibration sequences (cheap runs)")
     ap.add_argument("--skip-teacher-logits", action="store_true")
     ap.add_argument("--skip-save", action="store_true", help="don't write the 70GB student (validation)")
+    ap.add_argument("--push-repo", default=None, help="HF dataset repo to persist coverage + teacher logits")
     args = ap.parse_args()
     cfg = load_config(args.config)
     model_id = args.model or cfg["model"]["id"]
+
+    import json
+    import os
 
     import torch
 
@@ -58,9 +62,13 @@ def main() -> None:  # pragma: no cover - runner-side
     for h in handles:
         h.remove()
     print(f"calibration batches processed: {n_batches}")
-    print("expert coverage:", coverage.summary())
+    summary = coverage.summary()
+    print("expert coverage:", summary)
     if coverage.dead_experts():
         print(f"WARN: {len(coverage.dead_experts())} dead experts — widen calibration coverage")
+    os.makedirs(args.out, exist_ok=True)
+    with open(f"{args.out}/coverage.json", "w") as f:
+        json.dump(summary, f, indent=2)
 
     # 3. naive per-group PTQ init: QuantLinear weights + fused-expert latents
     done = ptq_init_model(student, hessians=None, percdamp=cfg["ptq"]["percdamp"])
@@ -82,6 +90,26 @@ def main() -> None:  # pragma: no cover - runner-side
             k=cfg["qad"]["teacher_topk"],
         )
         print(f"saved teacher top-{cfg['qad']['teacher_topk']} logits -> {args.out}/teacher_topk")
+
+    # 5. persist artifacts to HF so a detached job's output survives (coverage always; logits if made)
+    if args.push_repo:
+        from huggingface_hub import HfApi
+
+        api = HfApi()
+        api.upload_file(
+            path_or_fileobj=f"{args.out}/coverage.json",
+            path_in_repo="coverage.json",
+            repo_id=args.push_repo,
+            repo_type="dataset",
+        )
+        if not args.skip_teacher_logits:
+            api.upload_folder(
+                folder_path=f"{args.out}/teacher_topk",
+                path_in_repo="teacher_topk",
+                repo_id=args.push_repo,
+                repo_type="dataset",
+            )
+        print(f"uploaded artifacts -> {args.push_repo}")
 
 
 if __name__ == "__main__":

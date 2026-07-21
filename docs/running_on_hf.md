@@ -72,8 +72,16 @@ hf jobs inspect <job_id>   # status + URL
 hf jobs cancel <job_id>
 ```
 
-`scripts/launch_hf.py` wraps Runs 2–5 (smoke/tests/baseline/ptq/qad) with the right flavor, timeout,
-secrets, and optional model-repo mount via the Python `run_job` API.
+## Model mount: not recommended (measured)
+
+`--mount-model` exists but **don't use it.** Measured on an actual run, HF's intra-datacenter
+download hits **~2.6 GB/s → the 70 GB model in ~27 s** (~$0.04). A read-only model *mount* does slow
+lazy reads of a 70 GB checkpoint and **stalled** at load in testing — strictly worse than the fast
+download. The real per-run cost is model-load-into-GPU + pip install, which a mount doesn't help.
+So just let each job download; it's negligible.
+
+`scripts/launch_hf.py` wraps the stages (tests/checktasks/baseline/ptq/qad) with the right flavor,
+timeout, and secrets via the Python `run_job` API.
 ```bash
 python scripts/launch_hf.py --stage tests   --flavor t4-small
 python scripts/launch_hf.py --stage baseline --flavor h200 --timeout 6h
