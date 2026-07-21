@@ -16,7 +16,7 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
-from bite.quant.fakequant import EPS, _to_groups
+from bite.quant.fakequant import EPS, _to_groups, quantize_binary, quantize_ternary
 
 
 def group_absmean_scales(w: Tensor, group_size: int) -> Tensor:
@@ -55,10 +55,22 @@ def gptq_quantize(
 
     Returns ``(w_hat, scales)`` with ``scales`` group-shaped ``[out, n_groups]``.
     """
-    dev, dtype = w.device, w.dtype
+    dtype = w.dtype
+    scales = group_absmean_scales(w.detach().float(), group_size)  # [out, n_groups]
+
+    # No Hessian -> identity preconditioner -> error feedback does nothing, so the GPTQ column
+    # loop is exactly plain per-group rounding. Take the fast vectorized path (critical: the
+    # loop over a 35B model's thousands of expert Linears would otherwise take hours).
+    if hessian is None:
+        if mode == "binary":
+            w_hat, _, _ = quantize_binary(w, group_size)
+        else:
+            w_hat, _, _ = quantize_ternary(w, group_size)
+        return w_hat.to(dtype), scales.to(dtype)
+
+    dev = w.device
     W = w.detach().float().clone()
     rows, cols = W.shape
-    scales = group_absmean_scales(W, group_size)  # [out, n_groups]
 
     H = torch.eye(cols, device=dev) if hessian is None else hessian.detach().float().clone()
     dead = torch.diag(H) == 0

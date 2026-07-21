@@ -18,9 +18,11 @@ quant:
   ternary_threshold: null  # null = BitNet absmean; float = TWN threshold ratio
 
 calibration:
-  dataset: null          # HF dataset id for the expert-balanced calib set
+  dataset: null          # HF dataset id (null -> allenai/c4 en, streamed)
+  text_field: text       # column holding raw text
+  seq_len: 2048          # packed sequence length
   tokens: 2_000_000
-  oversample_tail: true  # oversample rarely-fired experts
+  oversample_tail: true  # oversample rarely-fired experts (2nd-pass, TODO)
 
 ptq:
   percdamp: 0.01
