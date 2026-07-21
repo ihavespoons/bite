@@ -22,12 +22,12 @@ def topk_teacher_logits(logits: Tensor, k: int = 64) -> tuple[Tensor, Tensor]:
     return values, indices
 
 
-def load_teacher_shard(path: str) -> tuple[Tensor, Tensor]:  # pragma: no cover - runner-side I/O
-    """Load a precomputed shard back as ``(values, indices)`` for the QAD loss."""
+def load_teacher_shard(path: str) -> tuple[Tensor, Tensor, Tensor]:  # pragma: no cover - runner I/O
+    """Load a shard as ``(input_ids, values, indices)`` — self-contained QAD training example."""
     import safetensors.torch as st
 
     d = st.load_file(path)
-    return d["values"], d["indices"]
+    return d["input_ids"], d["values"], d["indices"]
 
 
 def precompute_teacher_logits(  # pragma: no cover - runner-side (teacher + data)
@@ -37,20 +37,27 @@ def precompute_teacher_logits(  # pragma: no cover - runner-side (teacher + data
     *,
     k: int = 64,
 ) -> None:
-    """Stream the QAD data through the frozen teacher; store top-k logits as shards.
+    """Stream the QAD data through the frozen teacher; store (input_ids, top-k logits) shards.
 
-    Runner-side: for each batch, forward the teacher under ``torch.no_grad``, take
-    :func:`topk_teacher_logits`, and write ``values``/``indices`` (fp16/int32) to
-    ``out_dir`` as safetensors shards keyed by batch id — later loaded as an HF dataset by the
-    QAD loop. Store on the HF Pro 1TB quota.
+    Each shard bundles the **input_ids** with the teacher's top-k ``values``/``indices`` so QAD is
+    driven entirely by the shards — no re-streaming of c4, which isn't order-reproducible, so the
+    targets always align with the exact tokens they were computed on. Shards go to ``out_dir`` and
+    are uploaded to the HF dataset by ``run_ptq --push-repo``.
     """
+    import os
+
     import safetensors.torch as st
 
+    os.makedirs(out_dir, exist_ok=True)
     for i, batch in enumerate(batches):
         with torch.no_grad():
             logits = teacher(**batch).logits
         values, indices = topk_teacher_logits(logits, k)
         st.save_file(
-            {"values": values.to(torch.float16).cpu(), "indices": indices.to(torch.int32).cpu()},
+            {
+                "input_ids": batch["input_ids"].to(torch.int32).cpu(),
+                "values": values.to(torch.float16).cpu(),
+                "indices": indices.to(torch.int32).cpu(),
+            },
             f"{out_dir}/teacher_topk_{i:06d}.safetensors",
         )
