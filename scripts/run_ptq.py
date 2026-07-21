@@ -32,34 +32,40 @@ def main() -> None:  # pragma: no cover - runner-side
     from bite.data.calib import stream_calibration
     from bite.models.loader import build_student, load_teacher, load_tokenizer
     from bite.moe.calibration import ExpertCoverage, attach_coverage_hooks
+    from bite.quant.experts import ptq_init_experts
     from bite.quant.ptq import ptq_init_model
     from bite.train.teacher import precompute_teacher_logits
 
     tokenizer = load_tokenizer(model_id)
 
-    # 1. student with QuantLinear across the language weights (vision excluded)
-    student, swapped = build_student(
+    # 1. student: QuantLinear (attention/lm-head) + fused-expert fake-quant (the MoE bulk)
+    student, swapped, experts = build_student(
         model_id, mode=cfg["quant"]["mode"], group_size=cfg["quant"]["group_size"]
     )
     device = str(next(student.parameters()).device)
-    print(f"swapped {len(swapped)} linears to {cfg['quant']['mode']}")
+    print(f"quantized {len(swapped)} linears + {len(experts)} fused-expert tensors ({cfg['quant']['mode']})")
 
     # 2. calibration pass: per-expert coverage (forward only)
     coverage = ExpertCoverage(cfg["moe"]["num_experts"], cfg["moe"]["routed_experts"])
     handles = attach_coverage_hooks(student, coverage)
+    print(f"coverage hooks attached: {len(handles)}")
     student.eval()
+    n_batches = 0
     with torch.no_grad():
         for batch in stream_calibration(cfg, tokenizer, device=device, max_seqs=args.max_seqs):
             student(**batch)
+            n_batches += 1
     for h in handles:
         h.remove()
+    print(f"calibration batches processed: {n_batches}")
     print("expert coverage:", coverage.summary())
     if coverage.dead_experts():
         print(f"WARN: {len(coverage.dead_experts())} dead experts — widen calibration coverage")
 
-    # 3. naive per-group PTQ init of every QuantLinear latent weight
+    # 3. naive per-group PTQ init: QuantLinear weights + fused-expert latents
     done = ptq_init_model(student, hessians=None, percdamp=cfg["ptq"]["percdamp"])
-    print(f"PTQ-initialized {len(done)} quant linears")
+    n_experts = ptq_init_experts(student)
+    print(f"PTQ-initialized {len(done)} quant linears + {n_experts} expert tensors")
     if not args.skip_save:
         student.save_pretrained(f"{args.out}/student")
         print(f"saved student -> {args.out}/student")

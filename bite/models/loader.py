@@ -88,12 +88,21 @@ def build_student(  # pragma: no cover - runner-side
     device_map: str = "auto",
     clip_ste: bool = False,
 ):
-    """Load the model and install :class:`QuantLinear` across the **language** weights only.
+    """Load the model, quantize the language weights: ``QuantLinear`` for the ``nn.Linear``
+    attention/lm-head, and fused-expert fake-quant for the MoE experts (3D Parameters).
 
-    Returns ``(student_model, swapped_map)``. The vision tower is left untouched (Stage 5 holds
-    it at 4-bit HQQ); the router gate and shared expert stay higher-precision via the policy.
+    Returns ``(model, swapped_linears, quantized_experts)``. Vision tower untouched (4-bit HQQ,
+    Stage 5); router gate and shared expert stay higher-precision.
     """
+    from bite.quant.experts import install_expert_fakequant
+
     model = _load_multimodal(model_id, device_map)
     policy = policy or default_policy(mode)
-    swapped = swap_language_model(model, policy, group_size=group_size, clip_ste=clip_ste)
-    return model, swapped
+    vision = find_vision_prefixes(model)
+    swapped = swap_linears(
+        model, policy, group_size=group_size, clip_ste=clip_ste, exclude_prefixes=vision
+    )
+    experts = install_expert_fakequant(
+        model, mode=mode, group_size=group_size, clip_ste=clip_ste, exclude_prefixes=vision
+    )
+    return model, swapped, experts
