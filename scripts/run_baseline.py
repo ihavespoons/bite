@@ -21,6 +21,8 @@ def main() -> None:
     ap.add_argument("--out", default="outputs/baseline.json")
     ap.add_argument("--push-repo", default=None, help="HF dataset repo to upload results to")
     ap.add_argument("--allow-code", action="store_true", help="enable humaneval code execution")
+    ap.add_argument("--apply-chat-template", action="store_true", help="format prompts w/ chat template")
+    ap.add_argument("--max-gen-toks", type=int, default=None, help="generation cap (thinking models)")
     args = ap.parse_args()
 
     from bite.config import load_config
@@ -35,7 +37,12 @@ def main() -> None:
         kw["confirm_run_unsafe_code"] = True
 
     results = run_lm_eval(
-        cfg["model"]["id"], tasks, batch_size=cfg["eval"].get("batch_size", 8), **kw
+        cfg["model"]["id"],
+        tasks,
+        batch_size=cfg["eval"].get("batch_size", 8),
+        apply_chat_template=args.apply_chat_template,
+        max_gen_toks=args.max_gen_toks,
+        **kw,
     )
     res = results["results"]
     print(res)
@@ -52,7 +59,7 @@ def main() -> None:
 
         HfApi().upload_file(
             path_or_fileobj=args.out,
-            path_in_repo="baseline.json",
+            path_in_repo=os.path.basename(args.out),
             repo_id=args.push_repo,
             repo_type="dataset",
         )
