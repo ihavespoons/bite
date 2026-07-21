@@ -39,7 +39,6 @@ def main() -> None:
     ap.add_argument("--model", default="Qwen/Qwen3.6-35B-A3B")
     ap.add_argument("--mount-model", action="store_true", help="mount the model repo at /model")
     ap.add_argument("--extra-args", default="", help="appended to the stage command")
-    ap.add_argument("--detach", action="store_true", help="return immediately (survives disconnect)")
     args = ap.parse_args()
 
     from huggingface_hub import run_job
@@ -62,8 +61,7 @@ def main() -> None:
         "command": ["bash", "-c", inner],
         "flavor": args.flavor,
         "timeout": args.timeout,
-        "detach": args.detach,
-    }
+    }  # run_job is always server-side (returns immediately); the job survives disconnect
     if secrets:
         kwargs["secrets"] = secrets
     if args.mount_model:
