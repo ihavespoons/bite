@@ -48,7 +48,12 @@ def _eval_variant(model_id, cfg, tokenizer, *, keep_lmhead: bool, tasks, limit):
     if mmlu is not None and base.get("mmlu"):
         out["mmlu_retained"] = mmlu / base["mmlu"]
         print(f"[{tag}] MMLU {mmlu:.4f} vs FP16 {base['mmlu']:.4f} -> {out['mmlu_retained']:.1%} retained")
+    # fully release the 70GB model before the next variant: lm-eval's HFLM leaves a reference
+    # cycle, so del + empty_cache alone don't reclaim it (was OOMing the 2nd build)
+    import gc
+
     del student
+    gc.collect()
     torch.cuda.empty_cache()
     return out
 
@@ -58,6 +63,7 @@ def main() -> None:  # pragma: no cover - runner
     ap.add_argument("--config", default="configs/ternary.yaml")
     ap.add_argument("--model", default=None)
     ap.add_argument("--eval-tasks", default="mmlu")
+    ap.add_argument("--variant", default="both", choices=("both", "ternary", "fp16"), help="which lm_head variant(s) to eval")
     ap.add_argument("--eval-limit", type=int, default=100, help="examples per MMLU subtask (fast directional read)")
     ap.add_argument("--out", default="outputs/diag/eval_quant.json")
     ap.add_argument("--push-repo", default=None)
@@ -73,8 +79,9 @@ def main() -> None:  # pragma: no cover - runner
     tasks = args.eval_tasks.split(",")
     tokenizer = load_tokenizer(model_id)
 
+    variants = {"both": (False, True), "ternary": (False,), "fp16": (True,)}[args.variant]
     results = []
-    for keep_lmhead in (False, True):
+    for keep_lmhead in variants:
         results.append(
             _eval_variant(model_id, cfg, tokenizer, keep_lmhead=keep_lmhead, tasks=tasks, limit=args.eval_limit)
         )
