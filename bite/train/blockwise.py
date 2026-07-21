@@ -103,6 +103,10 @@ def distill_block(
         loss.backward()
         opt.step()
         history.append(float(loss.detach()))
+    # Free this block's gradients before the optimizer is discarded. Otherwise each healed
+    # block's .grad tensors (the fused expert latents alone are ~1.6GB/block) stay resident and
+    # accumulate across all 40 blocks -> OOM partway through (was hitting it at block ~34).
+    opt.zero_grad(set_to_none=True)
     return history
 
 

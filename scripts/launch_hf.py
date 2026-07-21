@@ -25,8 +25,12 @@ STAGES = {
     "checktasks": ("eval", "python scripts/check_tasks.py {extra}"),
     "baseline": ("model,eval", "python scripts/run_baseline.py --config {config} {extra}"),
     "ptq": ("model", "python scripts/run_ptq.py --config {config} --out outputs/ptq {model_arg} {extra}"),
-    # block-wise QAD uses AdamW (no deepspeed/bitsandbytes) but needs the fla DeltaNet kernel
-    "qad": ("model,qad", "python scripts/run_qad.py --config {config} {extra}"),
+    # block-wise QAD uses AdamW (no deepspeed/bitsandbytes) but needs the fla DeltaNet kernel;
+    # expandable_segments cuts allocator fragmentation across the 40 per-block heal cycles
+    "qad": (
+        "model,qad",
+        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python scripts/run_qad.py --config {config} {extra}",
+    ),
 }
 
 
