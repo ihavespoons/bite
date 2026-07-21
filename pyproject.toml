@@ -26,6 +26,12 @@ model = [
 train = [
     "deepspeed>=0.15",
     "bitsandbytes>=0.44",  # 8-bit optimizer for the end-to-end polish pass
+    # GatedDeltaNet fast-path kernels. The torch fallback recurrence is not autograd-safe
+    # (mutates the saved [B,H,d,d] state in-place -> breaks backward through DeltaNet blocks
+    # during QAD); these Triton/CUDA kernels are backward-safe and required to heal the
+    # DeltaNet-hosted MoE/attention weights.
+    "flash-linear-attention>=0.1",
+    "causal-conv1d>=1.4",
 ]
 # pinned so the FP16 baseline and later quantized evals use the identical harness (apples-to-apples
 # % retained). 0.4.12's humaneval task is broken (missing pass_at_k) -> excluded in configs.

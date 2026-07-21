@@ -88,14 +88,18 @@ def distill_block(
         p.requires_grad_(False)
 
     batches = list(inputs)
+    # The teacher block is frozen and each input is fixed, so its targets are constant across
+    # steps — compute them once (fewer forwards) and, crucially, so the teacher's forward never
+    # shares/mutates tensors that the student's autograd graph depends on.
+    with torch.no_grad():
+        targets = [forward_fn(teacher_block, x).detach() for x in batches]
+
     history: list[float] = []
     for step in range(steps):
-        x = batches[step % len(batches)]
+        idx = step % len(batches)
         opt.zero_grad()
-        with torch.no_grad():
-            target = forward_fn(teacher_block, x)
-        out = forward_fn(student_block, x)
-        loss = F.mse_loss(out.float(), target.float())
+        out = forward_fn(student_block, batches[idx])
+        loss = F.mse_loss(out.float(), targets[idx].float())
         loss.backward()
         opt.step()
         history.append(float(loss.detach()))
