@@ -32,6 +32,11 @@ STAGES = {
         "model,qad,eval",
         "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python scripts/run_qad.py --config {config} {extra}",
     ),
+    # forward-only PTQ diagnostic (no QAD/backward -> no fla needed)
+    "evalquant": (
+        "model,eval",
+        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python scripts/eval_quant.py --config {config} {extra}",
+    ),
 }
 
 
