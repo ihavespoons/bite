@@ -23,15 +23,17 @@ model = [
     "safetensors>=0.4",
     "datasets>=3.0",
 ]
+# GatedDeltaNet fast-path kernel for block-wise QAD. The torch fallback recurrence is NOT
+# autograd-safe (mutates the saved [B,H,d,d] delta-rule state in-place -> breaks backward through
+# DeltaNet blocks); flash-linear-attention's Triton chunk kernel is backward-safe. It's a pure
+# Triton/Python install (no CUDA compile) — kept separate from `train` so the block-wise pass
+# (plain AdamW) needn't pull deepspeed/bitsandbytes and hit their torch-version conflicts. The
+# short-conv stays on the autograd-safe torch fallback (causal-conv1d's source build mismatched
+# the image's nvcc vs the torch it pulled).
+qad = ["flash-linear-attention>=0.1"]
 train = [
     "deepspeed>=0.15",
     "bitsandbytes>=0.44",  # 8-bit optimizer for the end-to-end polish pass
-    # GatedDeltaNet fast-path kernels. The torch fallback recurrence is not autograd-safe
-    # (mutates the saved [B,H,d,d] state in-place -> breaks backward through DeltaNet blocks
-    # during QAD); these Triton/CUDA kernels are backward-safe and required to heal the
-    # DeltaNet-hosted MoE/attention weights.
-    "flash-linear-attention>=0.1",
-    "causal-conv1d>=1.4",
 ]
 # pinned so the FP16 baseline and later quantized evals use the identical harness (apples-to-apples
 # % retained). 0.4.12's humaneval task is broken (missing pass_at_k) -> excluded in configs.
