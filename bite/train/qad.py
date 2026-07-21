@@ -79,8 +79,8 @@ def qad_loss(
 # --- cloud-runner training loop (delegates to the block-wise engine) ---
 
 
-def run_blockwise_qad(config: dict) -> None:  # pragma: no cover - requires model + GPU
+def run_blockwise_qad(config: dict, **kwargs):  # pragma: no cover - requires model + GPU
     """Block-wise QAD entrypoint — see :func:`bite.train.blockwise.run_blockwise_qad`."""
     from bite.train.blockwise import run_blockwise_qad as _run
 
-    _run(config)
+    return _run(config, **kwargs)

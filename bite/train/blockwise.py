@@ -14,11 +14,13 @@ full-model orchestration is runner-side.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+from bite.quant.experts import expert_latent_params
 from bite.quant.quantlinear import QuantLinear
 
 
@@ -38,12 +40,18 @@ def iter_blocks(model: nn.Module, layers_path: str | None = None) -> list[nn.Mod
 
 
 def quant_parameters(module: nn.Module) -> list[nn.Parameter]:
-    """The trainable low-bit latent weights in a block — i.e. only ``QuantLinear.weight``.
+    """The trainable low-bit latent weights in a block: ``QuantLinear.weight`` **and** the fused
+    MoE expert latent Parameters (``gate_up_proj``/``down_proj``, via their parametrization).
 
+    In this MoE the experts are the bulk of the low-bit weights and live as fused 3D
+    ``nn.Parameter``s, not ``nn.Linear`` — so healing them requires collecting
+    :func:`bite.quant.experts.expert_latent_params` alongside the ``QuantLinear`` weights.
     Everything else (router gate, shared expert, RMSNorm, DeltaNet params, biases) is left out,
     which is exactly the precision policy: those stay in higher precision and are not healed.
     """
-    return [m.weight for m in module.modules() if isinstance(m, QuantLinear)]
+    params = [m.weight for m in module.modules() if isinstance(m, QuantLinear)]
+    params.extend(expert_latent_params(module))
+    return params
 
 
 def build_optimizer(params: list[nn.Parameter], *, lr: float = 1e-4, kind: str = "adam"):
@@ -94,20 +102,181 @@ def distill_block(
     return history
 
 
-def run_blockwise_qad(config: dict) -> None:  # pragma: no cover - requires model + GPU
+# --- per-block forward adapter -------------------------------------------------------------
+#
+# Real Qwen3.5 decoder blocks are NOT called ``block(hidden)``: a full-attention layer takes
+# ``(hidden_states, position_embeddings=..., attention_mask=..., position_ids=...)`` while a
+# GatedDeltaNet layer takes a different mix, and both may return a tuple. Rather than hard-code
+# either signature, we **capture** the exact ``(args, kwargs)`` each block is called with during
+# one real model forward (:func:`capture_block_inputs`) and replay them, threading only the
+# hidden state between blocks. This makes the DeltaNet-vs-attention difference a non-issue.
+
+
+@dataclass
+class BlockInput:
+    """A captured block call with the hidden state pulled out so it can be re-threaded."""
+
+    hidden: Tensor
+    rest: tuple = ()
+    kwargs: dict = field(default_factory=dict)
+
+
+def _block_output(out):
+    """Normalize a decoder-block return (tensor or ``(hidden, ...)`` tuple) to the hidden tensor."""
+    return out[0] if isinstance(out, (tuple, list)) else out
+
+
+def forward_block(block: nn.Module, item: BlockInput) -> Tensor:
+    """Run ``block`` on a :class:`BlockInput`, returning its output hidden state.
+
+    Suitable as ``distill_block``'s ``forward_fn`` for real decoder blocks: it reuses the
+    captured non-hidden kwargs (rotary embeddings, masks) and substitutes the threaded hidden.
+    """
+    return _block_output(block(item.hidden, *item.rest, **item.kwargs))
+
+
+def capture_block_inputs(  # pragma: no cover - requires model + GPU
+    model: nn.Module, blocks: list[nn.Module], batch: dict
+) -> tuple[Tensor, list[tuple]]:
+    """One real forward; return ``(block0_hidden, per_block_(rest_args, kwargs))``.
+
+    Uses forward-pre-hooks with ``with_kwargs=True`` so we record exactly what each block
+    receives — no assumptions about the (differing) DeltaNet vs full-attention signatures.
+    """
+    caps: list[tuple | None] = [None] * len(blocks)
+    grabbed: dict[str, Tensor] = {}
+
+    def mk(i: int):
+        def pre(_mod, args, kwargs):
+            hidden = args[0] if args else kwargs["hidden_states"]
+            if i == 0:
+                grabbed["h0"] = hidden.detach()
+            rest = tuple(args[1:]) if args else ()
+            kw = {k: v for k, v in kwargs.items() if k != "hidden_states"}
+            caps[i] = (rest, kw)
+
+        return pre
+
+    handles = [b.register_forward_pre_hook(mk(i), with_kwargs=True) for i, b in enumerate(blocks)]
+    try:
+        with torch.no_grad():
+            model(**batch)
+    finally:
+        for h in handles:
+            h.remove()
+    return grabbed["h0"], [c for c in caps if c is not None]
+
+
+def run_blockwise_qad(  # pragma: no cover - requires model + GPU
+    config: dict,
+    *,
+    model_id: str | None = None,
+    max_seqs: int | None = None,
+    max_blocks: int | None = None,
+    out_dir: str = "outputs/qad",
+    push_repo: str | None = None,
+    skip_save: bool = False,
+) -> dict:
     """Full-model block-wise QAD orchestration (runner-side).
 
-    Steps on the H200 runner:
-      1. load the PTQ-initialized student (Stage 2) and a source of FP16 teacher block weights;
-      2. ``h = embed(batch)``; for each ``(student_block, teacher_block)`` in
-         :func:`iter_blocks` order, run :func:`distill_block` (loading the teacher block's FP16
-         weights just for that step), checkpoint the healed block, then advance ``h`` through the
-         healed student block so later blocks see realistic (quant-accumulated) inputs;
-      3. optional end-to-end polish: unfreeze all blocks, minimize
-         :func:`bite.train.qad.qad_loss` against the precomputed teacher top-k logits with an
-         ``adam8bit`` optimizer;
-      4. evaluate with :mod:`bite.eval.harness`; gate on ternary ≥ ~93% of FP16.
+    Schedule (fits one H200 — only the student is resident on GPU; the FP16 teacher stays on CPU
+    and one block at a time is streamed to GPU to produce targets):
+
+      1. Build the PTQ-initialized student (``build_student`` + ``ptq_init_model`` +
+         ``ptq_init_experts``) and load the frozen FP16 teacher onto CPU.
+      2. For a modest calibration set, capture each block's real call signature
+         (:func:`capture_block_inputs`) and the block-0 hidden input.
+      3. Walk blocks in order; for each, move the teacher block to GPU, run :func:`distill_block`
+         (hidden-MSE, STE through the student block's quant latents — QuantLinear **and** fused
+         experts), move the teacher block back, then advance the running hidden through the
+         healed student block so later blocks see realistic (quant-accumulated) inputs.
+      4. Save the healed student; caller evaluates MMLU vs the FP16 baseline (gate ≥ ~93%).
+
+    ``max_seqs``/``max_blocks`` cap the run for cheap GPU validation of the forward adapter.
+    Returns a metrics dict (per-block first/last loss) for logging/persistence.
     """
-    raise NotImplementedError(
-        "run on the cloud runner via scripts/run_qad.py; see docstring for the block schedule"
+    import json
+    import os
+
+    from bite.data.calib import stream_calibration
+    from bite.models.loader import build_student, load_teacher, load_tokenizer
+    from bite.quant.experts import ptq_init_experts
+    from bite.quant.ptq import ptq_init_model
+
+    mid = model_id or config["model"]["id"]
+    layers_path = config["qad"].get("layers_path")
+    steps = int(config["qad"].get("block_steps", 200))
+    lr = float(config["qad"].get("lr", 1e-4))
+    os.makedirs(out_dir, exist_ok=True)
+
+    tokenizer = load_tokenizer(mid)
+
+    # 1. PTQ-init student on GPU
+    student, swapped, experts = build_student(
+        mid, mode=config["quant"]["mode"], group_size=config["quant"]["group_size"]
     )
+    device = str(next(student.parameters()).device)
+    ptq_init_model(student, hessians=None, percdamp=config["ptq"]["percdamp"])
+    ptq_init_experts(student)
+    student.eval()
+    log = f"student: {len(swapped)} linears + {len(experts)} expert tensors ({config['quant']['mode']})"
+    print(log)
+
+    student_blocks = iter_blocks(student, layers_path)
+    if max_blocks:
+        student_blocks = student_blocks[:max_blocks]
+
+    # 2. capture block IO on a modest calibration set (activations stay on GPU — keep it small)
+    hiddens: list[Tensor] = []
+    caps_per_batch: list[list[tuple]] = []
+    for batch in stream_calibration(config, tokenizer, device=device, max_seqs=max_seqs):
+        h0, caps = capture_block_inputs(student, iter_blocks(student, layers_path), batch)
+        hiddens.append(h0)
+        caps_per_batch.append(caps)
+    print(f"captured block IO for {len(hiddens)} calibration batches")
+
+    # 3. teacher on CPU; stream one block at a time to GPU for targets
+    teacher = load_teacher(mid, device_map="cpu")
+    teacher_blocks = iter_blocks(teacher, layers_path)
+
+    metrics: dict[str, list[float]] = {}
+    for i, sblk in enumerate(student_blocks):
+        tblk = teacher_blocks[i].to(device)
+        items = [
+            BlockInput(hiddens[b], caps_per_batch[b][i][0], caps_per_batch[b][i][1])
+            for b in range(len(hiddens))
+        ]
+        history = distill_block(
+            sblk, tblk, items, steps=steps, lr=lr, forward_fn=forward_block
+        )
+        teacher_blocks[i].to("cpu")
+        torch.cuda.empty_cache()
+        # advance the running hidden through the healed student block (no grad)
+        with torch.no_grad():
+            for b in range(len(hiddens)):
+                hiddens[b] = forward_block(sblk, items[b]).detach()
+        metrics[f"block_{i:02d}"] = [history[0], history[-1]] if history else []
+        print(f"block {i:02d}: loss {history[0]:.4e} -> {history[-1]:.4e}" if history else f"block {i:02d}: no quant params")
+
+    del teacher
+    torch.cuda.empty_cache()
+
+    with open(f"{out_dir}/qad_metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
+    if not skip_save:
+        student.save_pretrained(f"{out_dir}/student")
+        print(f"saved healed student -> {out_dir}/student")
+
+    if push_repo:
+        from huggingface_hub import HfApi
+
+        api = HfApi()
+        api.upload_file(
+            path_or_fileobj=f"{out_dir}/qad_metrics.json",
+            path_in_repo="qad_metrics.json",
+            repo_id=push_repo,
+            repo_type="dataset",
+        )
+        print(f"uploaded qad_metrics.json -> {push_repo}")
+
+    return metrics
