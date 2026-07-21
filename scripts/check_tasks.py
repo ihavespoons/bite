@@ -17,7 +17,8 @@ def main() -> None:
     tasks = sys.argv[1:] or load_config("configs/ternary.yaml")["eval"]["tasks"]
     _ensure_nltk()
     td = get_task_dict(tasks, TaskManager())
-    print(f"tasks load OK ({len(td)} built): {sorted(td)[:6]}{' ...' if len(td) > 6 else ''}")
+    names = [str(k) for k in td]  # keys mix ConfigurableGroup (mmlu) and str -> stringify
+    print(f"tasks load OK ({len(td)} built): {names[:6]}{' ...' if len(td) > 6 else ''}")
 
 
 if __name__ == "__main__":
