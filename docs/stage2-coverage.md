@@ -28,4 +28,11 @@ tail; see `bite.moe.calibration.sample_weights`, currently a TODO 2nd pass).
   token count; fractions/Gini are ratios and remain meaningful, but as a **global** mix, not
   per-layer. Per-layer coverage is a useful refinement.
 - Naive-PTQ student not saved (deterministic, re-derived at QAD start).
-- Not yet produced: teacher top-k logits (the reusable QAD artifact) — next scoped run.
+
+## Teacher logits (job teacher-logits) — QAD input ready ✅
+- 512 seqs (~1M tokens), **top-64 logits + input_ids** per token, 64 self-contained shards
+  (~407 MB) at `datasets/ihavespoons/bite-baseline/teacher_topk/`.
+- Each shard bundles input_ids so QAD trains against the exact tokens the targets came from
+  (no c4 re-stream). Load with `bite.train.teacher.load_teacher_shard`.
+- Scalable: re-run `run_ptq --teacher-only --max-seqs N --push-repo ...` for a larger set once
+  the QAD loop is validated.
