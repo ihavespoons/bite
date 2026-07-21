@@ -34,7 +34,9 @@ def main() -> None:
     if args.allow_code:
         kw["confirm_run_unsafe_code"] = True
 
-    results = run_lm_eval(cfg["model"]["id"], tasks, **kw)
+    results = run_lm_eval(
+        cfg["model"]["id"], tasks, batch_size=cfg["eval"].get("batch_size", 8), **kw
+    )
     res = results["results"]
     print(res)
 

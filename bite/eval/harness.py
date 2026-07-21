@@ -56,12 +56,15 @@ def _ensure_nltk() -> None:  # pragma: no cover - runner-side
             pass
 
 
-def run_lm_eval(model_id_or_path: str, tasks: list[str], **kw):  # pragma: no cover - runner
+def run_lm_eval(model_id_or_path: str, tasks: list[str], batch_size: int = 8, **kw):  # pragma: no cover
     """Text-benchmark suite via ``lm-eval``, robust to the multimodal model class.
 
     Loads the model with our multimodal-aware loader and wraps it in an ``HFLM`` instance, so
     ``lm-eval`` evaluates the already-loaded model instead of re-loading it with the default
     ``AutoModelForCausalLM`` (which may not resolve ``...ForConditionalGeneration``).
+
+    ``batch_size`` is a fixed integer, not ``"auto"``: with this model's ~248K vocab, an
+    auto-selected large batch overflows 32-bit CUDA index math on the logits tensor.
     """
     from lm_eval import simple_evaluate
     from lm_eval.models.huggingface import HFLM
@@ -70,5 +73,5 @@ def run_lm_eval(model_id_or_path: str, tasks: list[str], **kw):  # pragma: no co
 
     _ensure_nltk()  # ifeval tokenizes with nltk punkt at eval time
     model = load_teacher(model_id_or_path)
-    lm = HFLM(pretrained=model, tokenizer=load_tokenizer(model_id_or_path), batch_size="auto")
+    lm = HFLM(pretrained=model, tokenizer=load_tokenizer(model_id_or_path), batch_size=batch_size)
     return simple_evaluate(model=lm, tasks=tasks, **kw)

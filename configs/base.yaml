@@ -42,6 +42,7 @@ eval:
   # humaneval dropped: broken in current lm-eval (humaneval/utils.py missing pass_at_k).
   # Add a code benchmark (mbpp / fixed lm-eval) later. These 3 need no code execution.
   tasks: [gsm8k, mmlu, ifeval]              # reasoning / knowledge / instruction-following
+  batch_size: 8                            # fixed, not "auto": 248K vocab overflows 32-bit index at large batch
   teacher_baseline: null  # filled by run_baseline
 
 vision:
