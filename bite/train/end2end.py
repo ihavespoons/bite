@@ -102,21 +102,21 @@ def _zero3_config(*, micro_batch: int, accum: int, offload_param: bool = False) 
     per-module on demand. Costs ~PCIe transfer per step but frees ~9GB/rank resident: the knob
     that closes the ~5GB backward-peak overshoot on 80GB A100s (H200s don't need it).
     """
+    # KNOB FLOOR: the fused gate_up_proj is 5.37e8 elements — BIGGER than the default
+    # reduce_bucket_size (5e8) and any tighter max_live cap. Params/grads that exceed these
+    # knobs hit DS's oversized special-case paths, which retained every layer's full expert
+    # grads through backward (+1.6GB/layer -> OOM). Keep BOTH knobs above the largest param.
     zero: dict = {
         "stage": 3,
+        "reduce_bucket_size": 6e8,
         "stage3_prefetch_bucket_size": 5e7,
         "stage3_param_persistence_threshold": 1e5,
-        "stage3_max_live_parameters": 1e9,
+        "stage3_max_live_parameters": 1.5e9,
         "stage3_gather_16bit_weights_on_model_save": True,
-        # Synchronous grad reduction. With overlap_comm (default true) reduction runs async on
-        # a side stream; 40 layers × ~1.6GB of expert grads outpace the interconnect and pending
-        # grads pile up through backward until OOM (observed: +1.6GB/layer on every layer,
-        # insensitive to resident headroom). Sync reduction bounds backward memory.
-        "overlap_comm": False,
+        "overlap_comm": False,  # sync reduction: bounded backward memory (async gave no benefit)
     }
     if offload_param:
         zero["offload_param"] = {"device": "cpu", "pin_memory": True}
-        zero["stage3_max_live_parameters"] = 3e8  # tighter live-gather cap while squeezed
     return {
         "train_micro_batch_size_per_gpu": micro_batch,
         "gradient_accumulation_steps": accum,

@@ -70,6 +70,8 @@ def main() -> None:
     ap.add_argument("--mode", default="reentrant", choices=("reentrant", "nonreentrant", "nocheckpoint"))
     ap.add_argument("--accum", type=int, default=1, help="gradient accumulation steps (accum=2 tests the non-boundary reduction path)")
     ap.add_argument("--assign-load", action="store_true", help="init via safetensors mmap + load_state_dict(assign=True) — mirrors the real e2e init path")
+    ap.add_argument("--reduce-bucket", type=float, default=5e8, help="reduce_bucket_size; set BELOW param numel to test the oversized-grad path")
+    ap.add_argument("--max-live", type=float, default=1e8, help="stage3_max_live_parameters; set BELOW param numel to test oversized-param release")
     ap.add_argument("--layers", type=int, default=16)
     ap.add_argument("--dim", type=int, default=1024)
     ap.add_argument("--experts", type=int, default=32)
@@ -112,9 +114,10 @@ def main() -> None:
             "zero_allow_untested_optimizer": True,
             "zero_optimization": {
                 "stage": 3,
+                "reduce_bucket_size": args.reduce_bucket,
                 "stage3_prefetch_bucket_size": 5e6,
                 "stage3_param_persistence_threshold": 1e4,
-                "stage3_max_live_parameters": 1e8,
+                "stage3_max_live_parameters": args.max_live,
             },
         },
     )
