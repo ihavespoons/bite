@@ -224,6 +224,10 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
         student.config.use_cache = False
     if hasattr(student, "gradient_checkpointing_enable"):
         student.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    # from_pretrained returns the model in EVAL mode and transformers gates checkpointing on
+    # self.training — without train() every layer's fake-quant weight output (~1.6GB × 40
+    # layers ≈ 64GB) is retained for backward, which OOM'd the a100x8 forward at 75.6/79GB.
+    student.train()
 
     # freeze the kept-precision tail; re-collect latents NOW (assign-load replaced the objects)
     for p in student.parameters():
@@ -243,6 +247,14 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     )
     device = engine.device
     _host_mem("sharded")
+    # verify the two memory levers are actually engaged before burning forward passes:
+    # ZeRO-3 partitioned the params (resident GPU ≈ shard size, not 70GB) and checkpointing
+    # will actually run (train mode survived deepspeed.initialize)
+    assert engine.module.training, "model must be in train() mode or checkpointing is skipped"
+    resident = torch.cuda.memory_allocated() / 1e9
+    print(f"post-shard resident {resident:.1f}GB/GPU "
+          f"(checkpointing={getattr(engine.module, 'is_gradient_checkpointing', '?')})")
+    assert resident < 40, f"params not sharded: {resident:.1f}GB resident (expect ~shard size)"
 
     import torch.distributed as dist
 
