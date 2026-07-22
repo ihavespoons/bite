@@ -150,9 +150,16 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     lw = config["qad"].get("loss_weights", {}) or {}
     os.makedirs(out_dir, exist_ok=True)
 
+    # Each rank loads the FULL model onto ITS OWN GPU (not device_map="auto", which spreads one
+    # copy across all visible GPUs -> under 4 ranks every GPU holds pieces of 4 models -> OOM).
+    # ZeRO-3 then partitions from there (70GB transient/GPU fits the 141GB card).
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     tokenizer = load_tokenizer(mid)
     student, swapped, experts = build_student(
-        mid, mode=config["quant"]["mode"], group_size=config["quant"]["group_size"]
+        mid,
+        mode=config["quant"]["mode"],
+        group_size=config["quant"]["group_size"],
+        device_map={"": local_rank},
     )
     ptq_init_model(student, hessians=None, percdamp=config["ptq"]["percdamp"])
     ptq_init_experts(student)
