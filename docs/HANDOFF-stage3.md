@@ -96,3 +96,22 @@ via hidden-MSE/STE, tested), `bite/train/qad.py` (`qad_loss` = top-k KL + hidden
 
 ## Spend so far: ~$35-40 total (mostly one-time baseline + cheap validations).
 ```
+
+---
+
+## ADDENDUM (2026-07-22): e2e QAD state — PAUSED (credits), resume point
+
+Block-wise QAD ran end-to-end but ternary collapsed to chance MMLU (0.245 vs 0.839; PTQ-only
+0.253; lm_head precision irrelevant). Recovery lever = END-TO-END logit-KL QAD (built:
+bite/train/end2end.py, scripts/run_e2e.py, launch stage `e2e`; init = mmap assign-load of the
+healed qad_student ckpt; client bnb Adam8bit under ZeRO-3 — validated clean in toy).
+
+BLOCKER: real-35B backward retains every layer's full expert grads (+1.6GB/layer -> OOM ~74GB)
+regardless of headroom. Toy (scripts/repro_zero3_parametrize.py, a10g ~$0.05) is ALWAYS flat —
+eliminated: parametrize/ckpt machinery, bnb-under-ZeRO3, accum>=2, assign-load, overlap_comm,
+oversized-vs-bucket knobs. REMAINING SUSPECTS: transformers grouped-GEMM experts forward
+(extend toy with the real Qwen3_5Moe experts module — NEXT), then fla GatedDeltaNet.
+Requirements found on the way (all committed): model.train() (eval silently disables ckpt),
+enable_input_require_grads, use_reentrant=True (non-reentrant breaks under ZeRO-3),
+device_map="cpu" load (GPU device_map blocks sharding), --mem-probe for per-layer prints.
+Branch stage3-qad @ 732c595. Reverie: bite-stage3-e2e-paused-resume-point.
