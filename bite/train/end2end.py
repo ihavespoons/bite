@@ -108,6 +108,11 @@ def _zero3_config(*, micro_batch: int, accum: int, offload_param: bool = False) 
         "stage3_param_persistence_threshold": 1e5,
         "stage3_max_live_parameters": 1e9,
         "stage3_gather_16bit_weights_on_model_save": True,
+        # Synchronous grad reduction. With overlap_comm (default true) reduction runs async on
+        # a side stream; 40 layers × ~1.6GB of expert grads outpace the interconnect and pending
+        # grads pile up through backward until OOM (observed: +1.6GB/layer on every layer,
+        # insensitive to resident headroom). Sync reduction bounds backward memory.
+        "overlap_comm": False,
     }
     if offload_param:
         zero["offload_param"] = {"device": "cpu", "pin_memory": True}
