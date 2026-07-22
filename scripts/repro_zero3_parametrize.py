@@ -68,6 +68,7 @@ class _Model(nn.Module):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", default="reentrant", choices=("reentrant", "nonreentrant", "nocheckpoint"))
+    ap.add_argument("--accum", type=int, default=1, help="gradient accumulation steps (accum=2 tests the non-boundary reduction path)")
     ap.add_argument("--layers", type=int, default=16)
     ap.add_argument("--dim", type=int, default=1024)
     ap.add_argument("--experts", type=int, default=32)
@@ -95,7 +96,7 @@ def main() -> None:
         optimizer=opt,
         config={
             "train_micro_batch_size_per_gpu": 1,
-            "gradient_accumulation_steps": 1,
+            "gradient_accumulation_steps": args.accum,
             "bf16": {"enabled": True},
             "zero_allow_untested_optimizer": True,
             "zero_optimization": {
@@ -120,7 +121,7 @@ def main() -> None:
         if i % 4 == 0:
             blk.parametrizations.gate_up_proj.original.register_hook(bwd_probe(i))
 
-    for step in range(3):
+    for step in range(2 * args.accum + 1):  # cross at least two optimizer-step boundaries
         # requires_grad mirrors enable_input_require_grads() in the real run: with reentrant
         # checkpointing + frozen embed, the checkpoint chain needs a grad-requiring input
         x = torch.randn(1, 512, args.dim, device=engine.device, dtype=torch.bfloat16, requires_grad=True)
