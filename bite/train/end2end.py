@@ -223,7 +223,15 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     if hasattr(student, "config"):
         student.config.use_cache = False
     if hasattr(student, "gradient_checkpointing_enable"):
-        student.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        # use_reentrant=True: the non-reentrant variant's saved-tensor metadata check breaks
+        # under ZeRO-3 (params are re-partitioned to numel-0 after each module forward, so the
+        # backward recompute sees different metadata -> CheckpointError). Reentrant + ZeRO-3 is
+        # the battle-tested combo (HF Trainer default).
+        student.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
+    if hasattr(student, "enable_input_require_grads"):
+        # reentrant checkpointing needs a grad-requiring input to anchor each block's backward;
+        # our embeddings are frozen, so mark the embedding OUTPUT (standard PEFT-style fix)
+        student.enable_input_require_grads()
     # from_pretrained returns the model in EVAL mode and transformers gates checkpointing on
     # self.training — without train() every layer's fake-quant weight output (~1.6GB × 40
     # layers ≈ 64GB) is retained for backward, which OOM'd the a100x8 forward at 75.6/79GB.
