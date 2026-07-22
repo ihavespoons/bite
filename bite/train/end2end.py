@@ -167,6 +167,7 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     micro_batch: int = 1,
     accum: int = 8,
     offload_param: bool = False,
+    mem_probe: bool = False,
     out_dir: str = "outputs/e2e",
     push_repo: str | None = None,
     skip_save: bool = False,
@@ -286,6 +287,35 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     probe_param = trainable[-1]
     with deepspeed.zero.GatheredParameters([probe_param]):
         probe_before = probe_param.flatten()[:4096].detach().clone().cpu()
+
+    if mem_probe and rank == 0:
+        # per-decoder-layer memory probes (toy showed the quant machinery is leak-free; this
+        # identifies WHICH real layers grow the allocation — the 3xDeltaNet+1xattn pattern
+        # fingerprints the culprit). fwd: module pre-hook; bwd: grad hook on a block latent.
+        from bite.train.blockwise import iter_blocks, quant_parameters as _qp
+
+        blocks = iter_blocks(engine.module, config["qad"].get("layers_path"))
+
+        def _fwd_probe(i):
+            def hook(_m, _args, _kwargs):
+                print(f"  fwd L{i:02d}: alloc {torch.cuda.memory_allocated() / 1e9:.1f}GB")
+
+            return hook
+
+        def _bwd_probe(i):
+            def hook(_g):
+                print(f"  bwd L{i:02d}: alloc {torch.cuda.memory_allocated() / 1e9:.1f}GB")
+                return None
+
+            return hook
+
+        for i, blk in enumerate(blocks):
+            if i % 4 == 0:
+                blk.register_forward_pre_hook(_fwd_probe(i), with_kwargs=True)
+            bp = _qp(blk)
+            if bp:
+                bp[0].register_hook(_bwd_probe(i))
+        print(f"mem probes on {len(blocks)} blocks (fwd every 4th, bwd all)")
 
     # smoke: accum+1 micro-steps guarantees crossing ONE real optimizer-step boundary — the
     # previous smoke (2 micro-steps, accum=8) never actually called optimizer.step()
