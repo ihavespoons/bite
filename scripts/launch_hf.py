@@ -41,7 +41,7 @@ STAGES = {
     # via the deepspeed launcher so torch.distributed is set up (single GPU is fine).
     "e2e": (
         "model,qad,train,eval",
-        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True deepspeed --num_gpus=1 scripts/run_e2e.py --config {config} {extra}",
+        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True deepspeed --num_gpus={num_gpus} scripts/run_e2e.py --config {config} {extra}",
     ),
 }
 
@@ -55,6 +55,7 @@ def main() -> None:
     ap.add_argument("--ref", default="main", help="git ref to run")
     ap.add_argument("--model", default="Qwen/Qwen3.6-35B-A3B")
     ap.add_argument("--mount-model", action="store_true", help="mount the model repo at /model")
+    ap.add_argument("--num-gpus", type=int, default=1, help="GPUs for the deepspeed launcher (e2e stage)")
     ap.add_argument("--extra-args", default="", help="appended to the stage command")
     args = ap.parse_args()
 
@@ -62,7 +63,9 @@ def main() -> None:
 
     extras, template = STAGES[args.stage]
     model_arg = "--model /model" if args.mount_model else ""
-    stage_cmd = template.format(config=args.config, model_arg=model_arg, extra=args.extra_args).strip()
+    stage_cmd = template.format(
+        config=args.config, model_arg=model_arg, extra=args.extra_args, num_gpus=args.num_gpus
+    ).strip()
 
     gh = os.environ.get("GITHUB_TOKEN", "")
     clone_url = f"https://x-access-token:${{GITHUB_TOKEN}}@{REPO}" if gh else f"https://{REPO}"

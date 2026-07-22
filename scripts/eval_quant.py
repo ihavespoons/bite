@@ -16,7 +16,7 @@ import argparse
 from bite.config import load_config
 
 
-def _eval_variant(model_id, cfg, tokenizer, *, keep_lmhead: bool, tasks, limit):  # pragma: no cover - runner
+def _eval_variant(model_id, cfg, tokenizer, *, keep_lmhead: bool, tasks, limit, load_weights=None):  # pragma: no cover - runner
     import torch
 
     from bite.models.loader import build_student
@@ -31,10 +31,19 @@ def _eval_variant(model_id, cfg, tokenizer, *, keep_lmhead: bool, tasks, limit):
     student, swapped, experts = build_student(
         model_id, mode=mode, group_size=cfg["quant"]["group_size"], policy=policy
     )
-    tag = "lm_head=FP16" if keep_lmhead else "lm_head=ternary"
-    print(f"[{tag}] quantized {len(swapped)} linears + {len(experts)} expert tensors")
-    ptq_init_model(student, hessians=None, percdamp=cfg["ptq"]["percdamp"])
-    ptq_init_experts(student)
+    if load_weights:
+        # eval a QAD-trained checkpoint: rebuild the fake-quant structure, then load the trained
+        # latents (the parametrizations re-apply fake-quant on forward). Consolidated e2e save.
+        import safetensors.torch as st
+
+        missing, unexpected = student.load_state_dict(st.load_file(load_weights), strict=False)
+        tag = f"e2e-trained (missing={len(missing)}, unexpected={len(unexpected)})"
+        print(f"[{tag}] loaded {load_weights}")
+    else:
+        tag = "lm_head=FP16" if keep_lmhead else "lm_head=ternary"
+        print(f"[{tag}] quantized {len(swapped)} linears + {len(experts)} expert tensors")
+        ptq_init_model(student, hessians=None, percdamp=cfg["ptq"]["percdamp"])
+        ptq_init_experts(student)
     student.eval()
     if hasattr(student, "config"):
         student.config.use_cache = False
@@ -64,6 +73,7 @@ def main() -> None:  # pragma: no cover - runner
     ap.add_argument("--model", default=None)
     ap.add_argument("--eval-tasks", default="mmlu")
     ap.add_argument("--variant", default="both", choices=("both", "ternary", "fp16"), help="which lm_head variant(s) to eval")
+    ap.add_argument("--load-weights", default=None, help="eval a QAD-trained consolidated checkpoint (safetensors) instead of PTQ-init")
     ap.add_argument("--eval-limit", type=int, default=100, help="examples per MMLU subtask (fast directional read)")
     ap.add_argument("--out", default="outputs/diag/eval_quant.json")
     ap.add_argument("--push-repo", default=None)
@@ -79,12 +89,17 @@ def main() -> None:  # pragma: no cover - runner
     tasks = args.eval_tasks.split(",")
     tokenizer = load_tokenizer(model_id)
 
-    variants = {"both": (False, True), "ternary": (False,), "fp16": (True,)}[args.variant]
     results = []
-    for keep_lmhead in variants:
+    if args.load_weights:
         results.append(
-            _eval_variant(model_id, cfg, tokenizer, keep_lmhead=keep_lmhead, tasks=tasks, limit=args.eval_limit)
+            _eval_variant(model_id, cfg, tokenizer, keep_lmhead=False, tasks=tasks, limit=args.eval_limit, load_weights=args.load_weights)
         )
+    else:
+        variants = {"both": (False, True), "ternary": (False,), "fp16": (True,)}[args.variant]
+        for keep_lmhead in variants:
+            results.append(
+                _eval_variant(model_id, cfg, tokenizer, keep_lmhead=keep_lmhead, tasks=tasks, limit=args.eval_limit)
+            )
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:
