@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Stage 3/4: block-wise Quantization-Aware Distillation against the frozen teacher. Runner-side.
+"""Stage 3: block-wise QAD (per-block hidden-MSE heal). Produces the init for run_e2e. Runner-side.
 
 Validate cheap first (the per-block forward adapter is the main unknown):
 

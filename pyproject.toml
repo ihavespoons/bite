@@ -33,7 +33,8 @@ model = [
 qad = ["flash-linear-attention>=0.1"]
 train = [
     "deepspeed>=0.15",
-    "bitsandbytes>=0.44",  # 8-bit optimizer for the end-to-end polish pass
+    "bitsandbytes>=0.44",  # 8-bit Adam: client optimizer under ZeRO-3 (end-to-end QAD)
+    "psutil",              # host-memory telemetry at load milestones (shared-page-cache check)
 ]
 # pinned so the FP16 baseline and later quantized evals use the identical harness (apples-to-apples
 # % retained). 0.4.12's humaneval task is broken (missing pass_at_k) -> excluded in configs.

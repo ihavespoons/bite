@@ -6,10 +6,20 @@ compounds across 40 blocks. Recovery needs a **global** signal — distilling th
 next-token distribution against the frozen FP16 teacher's precomputed top-k logits (plus a CE
 term), with STE gradients flowing to every quantized latent weight (attention + fused experts).
 
-Training all ~33B trainable params exceeds one H200, so this runs under **DeepSpeed ZeRO-3 with
-CPU offload** (params/grads/optimizer offloaded; one layer's params gathered to GPU at a time)
-plus gradient checkpointing. The loss and shard-iteration are pure/CPU-testable; the ZeRO-3
-driver is runner-side.
+Memory design (the hard-won part — four OOMs taught us this):
+- **DeepSpeed ZeRO-3, everything on-GPU, no offload.** fp32 Adam state for ~33B params is
+  ~400GB — it fits nowhere as fp32+offload. Instead a **bitsandbytes 8-bit Adam** is passed as
+  the *client* optimizer (production precedent: HF Trainer ``adamw_bnb_8bit`` + ZeRO-3): DS
+  replaces its param groups with fp32 flat partitions and calls its CUDA step on them. Budget
+  per GPU (of 141GB): params 17.5 + grads 16.5 + fp32 masters 33 + 8-bit states 16.6 ≈ 84GB
+  resident, ~105GB peak with fake-quant temporaries/logits/comm buffers.
+- The fp32 flat master ZeRO-3 keeps is not waste — STE recovery *needs* it (bf16's ~8 mantissa
+  bits swallow the tiny updates that accumulate toward a ternary boundary flip).
+- **Init is loaded, not computed**: each rank assign-loads the block-wise-healed checkpoint via
+  safetensors mmap (zero-copy, read-only) so 4 ranks share ~70GB of page cache instead of
+  materializing 4×70GB (in-run PTQ init *writes*, which COW-materializes every page).
+
+The loss and shard-iteration are pure/CPU-testable; the ZeRO-3 driver is runner-side.
 """
 
 from __future__ import annotations
@@ -80,32 +90,62 @@ def download_teacher_shards(repo: str, local_dir: str) -> str:  # pragma: no cov
     return f"{local_dir}/teacher_topk"
 
 
-def _zero3_offload_config(lr: float, *, micro_batch: int, accum: int, offload_param: bool) -> dict:
-    """DeepSpeed ZeRO-3 config.
+def _zero3_config(*, micro_batch: int, accum: int) -> dict:
+    """DeepSpeed ZeRO-3 config: all training state on-GPU, sharded across ranks — NO offload.
 
-    Across 4 GPUs the fp32 optimizer state for ~33B params (~400GB) is offloaded to the
-    (large) multi-GPU host RAM while params/grads shard on-GPU (~34GB/GPU) — comfortable. On a
-    single GPU set ``offload_param=True`` too (needed to fit 70GB of weights), but then the
-    optimizer offload alone can exceed a smaller host's RAM (that OOM-killed the 1-GPU attempt).
+    The optimizer is a *client* bnb ``Adam8bit`` (CUDA-only step; offload would break it), hence
+    ``zero_allow_untested_optimizer``. No ``optimizer`` block — DS must use the client instance.
+    ``sub_group_size`` stays at its 1e9 default (bnb kernels use 32-bit indexing internally).
+    Gradient clipping is DS's job (fp32 partition grads, pre-step); bnb clipping stays off.
     """
-    zero = {
-        "stage": 3,
-        "offload_optimizer": {"device": "cpu", "pin_memory": True},
-        "stage3_prefetch_bucket_size": 5e7,
-        "stage3_param_persistence_threshold": 1e5,
-        "stage3_max_live_parameters": 1e9,
-        "stage3_gather_16bit_weights_on_model_save": True,
-    }
-    if offload_param:
-        zero["offload_param"] = {"device": "cpu", "pin_memory": True}
     return {
         "train_micro_batch_size_per_gpu": micro_batch,
         "gradient_accumulation_steps": accum,
         "bf16": {"enabled": True},
         "gradient_clipping": 1.0,
-        "zero_optimization": zero,
-        "optimizer": {"type": "AdamW", "params": {"lr": lr, "betas": [0.9, 0.999]}},
+        "zero_allow_untested_optimizer": True,
+        "zero_optimization": {
+            "stage": 3,
+            "stage3_prefetch_bucket_size": 5e7,
+            "stage3_param_persistence_threshold": 1e5,
+            "stage3_max_live_parameters": 1e9,
+            "stage3_gather_16bit_weights_on_model_save": True,
+        },
     }
+
+
+def _host_mem(tag: str) -> None:  # pragma: no cover - runner-side telemetry
+    """Log host memory at load milestones (validates the shared-page-cache design)."""
+    try:
+        import psutil
+
+        vm = psutil.virtual_memory()
+        print(f"[mem:{tag}] host available {vm.available / 1e9:.0f}GB of {vm.total / 1e9:.0f}GB")
+    except Exception:  # noqa: BLE001 - telemetry only
+        pass
+
+
+def load_init_checkpoint(student, repo: str, out_dir: str) -> None:  # pragma: no cover - runner I/O
+    """Assign-load the block-wise-healed student checkpoint via safetensors mmap (read-only).
+
+    ``load_state_dict(..., assign=True)`` swaps the Parameter *objects* for mmap-backed tensors,
+    so all ranks share the file page cache (~70GB total, not 70GB × ranks) and nothing is
+    written on CPU. Anything collected from the model **before** this call (e.g. a
+    ``quant_parameters`` list) is stale afterwards — always re-collect.
+    """
+    import safetensors.torch as st
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(
+        repo_id=repo, repo_type="dataset", allow_patterns="qad_student/*", local_dir=out_dir
+    )
+    sd: dict = {}
+    for shard in sorted(glob.glob(f"{out_dir}/qad_student/*.safetensors")):
+        sd.update(st.load_file(shard))  # zero-copy mmap on CPU
+    missing, unexpected = student.load_state_dict(sd, strict=False, assign=True)
+    real_missing = [k for k in missing if "inv_freq" not in k]  # non-persistent buffers are fine
+    assert not unexpected and not real_missing, (real_missing[:5], list(unexpected)[:5])
+    print(f"assign-loaded {len(sd)} tensors from {repo}/qad_student (mmap, shared page cache)")
 
 
 def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
@@ -113,25 +153,27 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     *,
     model_id: str | None = None,
     teacher_repo: str | None = None,
+    init_repo: str | None = None,
+    ptq_init: bool = False,
     steps: int | None = None,
     micro_batch: int = 1,
     accum: int = 8,
-    eval_tasks: list[str] | None = None,
-    eval_limit: int | None = None,
-    offload_param_cpu: bool = False,
     out_dir: str = "outputs/e2e",
     push_repo: str | None = None,
     skip_save: bool = False,
     smoke: bool = False,
 ) -> dict:
-    """End-to-end ternary QAD under DeepSpeed ZeRO-3 CPU offload (runner-side).
+    """End-to-end ternary QAD under DeepSpeed ZeRO-3, all on-GPU (runner-side).
 
-    1. Build the PTQ-init student, freeze the kept-precision tail, mark the quantized latents
-       (QuantLinear weights + fused expert originals) trainable, enable gradient checkpointing.
-    2. ``deepspeed.initialize`` with ZeRO-3 offload; iterate the precomputed teacher shards,
-       minimizing :func:`end2end_loss` (top-k logit KL + next-token CE) via STE.
-    3. Eval MMLU vs the FP16 baseline. ``smoke=True`` runs a couple of steps only (integration
-       check) — no eval/save.
+    1. Build the fake-quant student on CPU (no device_map hooks — they block ZeRO-3 sharding),
+       assign-load the healed checkpoint from ``init_repo`` (mmap, read-only; ``ptq_init=True``
+       is the escape hatch that recomputes naive PTQ instead — costs 70GB CPU per rank).
+    2. Freeze everything, re-collect + mark the quantized latents trainable, build a client
+       bnb ``Adam8bit``, ``deepspeed.initialize`` (ZeRO-3, no offload).
+    3. Iterate the precomputed teacher shards rank-sharded, minimizing :func:`end2end_loss`.
+    4. Save a consolidated 16-bit checkpoint; MMLU runs in a separate 1-GPU reload-eval job
+       (``eval_quant.py --load-weights``). ``smoke=True`` runs ``accum+1`` micro-steps so ONE
+       real optimizer step happens, then asserts state/params actually moved — no eval/save.
     """
     import json
     import os
@@ -139,8 +181,7 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     import deepspeed
 
     from bite.models.loader import build_student, load_tokenizer
-    from bite.quant.experts import ptq_init_experts
-    from bite.quant.ptq import ptq_init_model
+    from bite.quant.fakequant import quantize_ternary
     from bite.train.blockwise import quant_parameters
 
     mid = model_id or config["model"]["id"]
@@ -148,27 +189,43 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     steps = int(steps if steps is not None else 200)
     temperature = float(config["qad"].get("temperature", 1.0))
     lw = config["qad"].get("loss_weights", {}) or {}
+    group_size = config["quant"]["group_size"]
     os.makedirs(out_dir, exist_ok=True)
 
-    # Load on CPU (NOT device_map to GPU): device_map installs accelerate device hooks that stop
-    # ZeRO-3 from partitioning the params, so every GPU kept a full ~70GB copy and OOM'd on step 1.
-    # Loading on CPU lets deepspeed.initialize own placement and shard params/grads to each GPU
-    # (~17.5GB/GPU). PTQ init runs on CPU, then deepspeed moves the shards to GPU.
+    _host_mem("start")
     tokenizer = load_tokenizer(mid)
+    # CPU build: device_map to GPU installs accelerate hooks that block ZeRO-3 partitioning
+    # (that was OOM #3); deepspeed.initialize owns placement and shards from here.
     student, swapped, experts = build_student(
         mid,
         mode=config["quant"]["mode"],
-        group_size=config["quant"]["group_size"],
+        group_size=group_size,
         device_map="cpu",
     )
-    ptq_init_model(student, hessians=None, percdamp=config["ptq"]["percdamp"])
-    ptq_init_experts(student)
+    _host_mem("built")
+    if ptq_init:
+        from bite.quant.experts import ptq_init_experts
+        from bite.quant.ptq import ptq_init_model
+
+        ptq_init_model(student, hessians=None, percdamp=config["ptq"]["percdamp"])
+        ptq_init_experts(student)
+    else:
+        load_init_checkpoint(student, init_repo or "ihavespoons/bite-baseline", out_dir)
+        # Identity is proven by the strict key match in load_init_checkpoint (only our saved
+        # student has parametrizations.*.original keys). The grid distance is telemetry only:
+        # healed latents start on-grid at PTQ init and drift off-grid as block-wise QAD trains
+        # them, so a small-but-nonzero distance is the EXPECTED signature of the healed ckpt.
+        if config["quant"]["mode"] == "ternary":
+            probe = quant_parameters(student)[-1].detach().float()
+            err = (probe - quantize_ternary(probe, group_size)[0]).abs().max().item()
+            print(f"init checkpoint grid distance (telemetry): max {err:.3e}")
+    _host_mem("loaded")
     if hasattr(student, "config"):
         student.config.use_cache = False
     if hasattr(student, "gradient_checkpointing_enable"):
         student.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
-    # only the quantized latents train; the kept-precision tail (router, shared expert, norms) is frozen
+    # freeze the kept-precision tail; re-collect latents NOW (assign-load replaced the objects)
     for p in student.parameters():
         p.requires_grad_(False)
     trainable = quant_parameters(student)
@@ -176,12 +233,16 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
         p.requires_grad_(True)
     print(f"student: {len(swapped)} linears + {len(experts)} expert tensors; {len(trainable)} trainable latents")
 
+    import bitsandbytes as bnb
+
+    opt = bnb.optim.Adam8bit(trainable, lr=lr, betas=(0.9, 0.999))  # NOT Paged* under ZeRO-3
     engine, _, _, _ = deepspeed.initialize(
         model=student,
-        model_parameters=[p for p in student.parameters() if p.requires_grad],
-        config=_zero3_offload_config(lr, micro_batch=micro_batch, accum=accum, offload_param=offload_param_cpu),
+        optimizer=opt,
+        config=_zero3_config(micro_batch=micro_batch, accum=accum),
     )
     device = engine.device
+    _host_mem("sharded")
 
     import torch.distributed as dist
 
@@ -191,6 +252,15 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     w_kl = float(lw.get("kl", 1.0))
     w_ce = float(lw.get("ce", 0.5))
 
+    # probe: a slice of one expert latent, cloned pre-training — the smoke asserts the optimizer
+    # step actually moved it (a silent bnb no-op on DS flat partitions would otherwise pass)
+    probe_param = trainable[-1]
+    with deepspeed.zero.GatheredParameters([probe_param]):
+        probe_before = probe_param.flatten()[:4096].detach().clone().cpu()
+
+    # smoke: accum+1 micro-steps guarantees crossing ONE real optimizer-step boundary — the
+    # previous smoke (2 micro-steps, accum=8) never actually called optimizer.step()
+    target_micro_steps = (accum + 1) if smoke else steps
     history: list[dict] = []
     step = 0
     done = False
@@ -209,17 +279,36 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
             engine.backward(loss)
             engine.step()
             history.append({"step": step, "loss": float(loss.detach()), **parts})
-            if step % 10 == 0:
-                print(f"step {step}: loss {float(loss.detach()):.4f} (kl {parts['kl']:.4f} ce {parts['ce']:.4f})")
+            if step % 10 == 0 or smoke:
+                alloc = torch.cuda.max_memory_allocated() / 1e9
+                print(
+                    f"step {step}: loss {float(loss.detach()):.4f} (kl {parts['kl']:.4f} "
+                    f"ce {parts['ce']:.4f}) peak {alloc:.0f}GB"
+                )
             step += 1
-            if step >= (2 if smoke else steps):
+            if step >= target_micro_steps:
                 done = True
                 break
 
     result: dict = {"steps": step, "loss_first": history[0]["loss"], "loss_last": history[-1]["loss"]}
     print(f"end-to-end QAD done: loss {result['loss_first']:.4f} -> {result['loss_last']:.4f}")
+
     if smoke:
-        print("SMOKE OK: deepspeed ZeRO-3 + parametrized student forward/backward/step work")
+        # 1. loss finite on every micro-step
+        assert all(h["loss"] == h["loss"] and abs(h["loss"]) < 1e6 for h in history), "non-finite loss"
+        # 2. bnb 8-bit state materialized on CUDA (DS hands it fp32 flat partitions)
+        state_dtypes = {
+            v.dtype for st_ in opt.state.values() for v in st_.values() if torch.is_tensor(v)
+        }
+        assert torch.uint8 in state_dtypes, f"bnb 8-bit state missing (dtypes: {state_dtypes})"
+        # 3. the probed latent slice actually moved
+        with deepspeed.zero.GatheredParameters([probe_param]):
+            probe_after = probe_param.flatten()[:4096].detach().cpu()
+        moved = (probe_after - probe_before).abs().max().item()
+        assert moved > 0, "optimizer step did not change the probed latent"
+        peak = torch.cuda.max_memory_allocated() / 1e9
+        print(f"SMOKE OK: optimizer step verified (probe moved {moved:.2e}, "
+              f"8-bit state on CUDA, peak {peak:.0f}GB/rank)")
         return result
 
     # Save a CONSOLIDATED 16-bit checkpoint (ZeRO-3 gathers the sharded params to rank 0). MMLU is
