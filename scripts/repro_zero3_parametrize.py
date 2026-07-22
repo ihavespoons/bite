@@ -30,25 +30,25 @@ from bite.train.blockwise import quant_parameters
 class _Block(nn.Module):
     """Toy decoder block: QuantLinear attn + parametrized fused 3D expert param (the combo)."""
 
-    def __init__(self, d: int, E: int, inter: int):
+    def __init__(self, d: int, E: int, inter: int, group_size: int = 128):
         super().__init__()
-        self.attn = QuantLinear(d, d, bias=False, mode="ternary", group_size=128)
+        self.attn = QuantLinear(d, d, bias=False, mode="ternary", group_size=group_size)
         self.gate_up_proj = nn.Parameter(torch.randn(E, d, inter) * 0.02)
         self.down_proj = nn.Parameter(torch.randn(E, inter, d) * 0.02)
         self.norm = nn.LayerNorm(d)
 
     def forward(self, x):  # x: [B, T, d]
         h = self.attn(x)
-        e = torch.einsum("btd,edi->bti", h, self.gate_up_proj.mean(0, keepdim=True).squeeze(0))
-        e = torch.einsum("bti,eid->btd", torch.nn.functional.gelu(e), self.down_proj.mean(0, keepdim=True).squeeze(0))
-        return self.norm(x + e)
+        e = torch.einsum("btd,edi->ebti", h, self.gate_up_proj)  # all experts, like grouped GEMM
+        e = torch.einsum("ebti,eid->btd", torch.nn.functional.gelu(e), self.down_proj)
+        return self.norm(x + e / self.gate_up_proj.shape[0])
 
 
 class _Model(nn.Module):
-    def __init__(self, n_layers: int, d: int, E: int, inter: int, mode: str):
+    def __init__(self, n_layers: int, d: int, E: int, inter: int, mode: str, group_size: int = 128):
         super().__init__()
         self.embed = nn.Linear(d, d, bias=False)
-        self.blocks = nn.ModuleList(_Block(d, E, inter) for _ in range(n_layers))
+        self.blocks = nn.ModuleList(_Block(d, E, inter, group_size) for _ in range(n_layers))
         self.mode = mode
 
     def forward(self, x):
