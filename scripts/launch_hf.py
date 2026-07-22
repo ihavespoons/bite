@@ -37,6 +37,12 @@ STAGES = {
         "model,eval",
         "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python scripts/eval_quant.py --config {config} {extra}",
     ),
+    # end-to-end QAD: needs fla (DeltaNet backward), deepspeed (ZeRO-3 offload), eval; launched
+    # via the deepspeed launcher so torch.distributed is set up (single GPU is fine).
+    "e2e": (
+        "model,qad,train,eval",
+        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True deepspeed --num_gpus=1 scripts/run_e2e.py --config {config} {extra}",
+    ),
 }
 
 
