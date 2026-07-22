@@ -150,23 +150,23 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     lw = config["qad"].get("loss_weights", {}) or {}
     os.makedirs(out_dir, exist_ok=True)
 
-    # Each rank loads the FULL model onto ITS OWN GPU (not device_map="auto", which spreads one
-    # copy across all visible GPUs -> under 4 ranks every GPU holds pieces of 4 models -> OOM).
-    # ZeRO-3 then partitions from there (70GB transient/GPU fits the 141GB card).
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    # Load on CPU (NOT device_map to GPU): device_map installs accelerate device hooks that stop
+    # ZeRO-3 from partitioning the params, so every GPU kept a full ~70GB copy and OOM'd on step 1.
+    # Loading on CPU lets deepspeed.initialize own placement and shard params/grads to each GPU
+    # (~17.5GB/GPU). PTQ init runs on CPU, then deepspeed moves the shards to GPU.
     tokenizer = load_tokenizer(mid)
     student, swapped, experts = build_student(
         mid,
         mode=config["quant"]["mode"],
         group_size=config["quant"]["group_size"],
-        device_map={"": local_rank},
+        device_map="cpu",
     )
     ptq_init_model(student, hessians=None, percdamp=config["ptq"]["percdamp"])
     ptq_init_experts(student)
     if hasattr(student, "config"):
         student.config.use_cache = False
     if hasattr(student, "gradient_checkpointing_enable"):
-        student.gradient_checkpointing_enable()
+        student.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
     # only the quantized latents train; the kept-precision tail (router, shared expert, norms) is frozen
     for p in student.parameters():
