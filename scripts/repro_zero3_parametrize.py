@@ -69,6 +69,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", default="reentrant", choices=("reentrant", "nonreentrant", "nocheckpoint"))
     ap.add_argument("--accum", type=int, default=1, help="gradient accumulation steps (accum=2 tests the non-boundary reduction path)")
+    ap.add_argument("--assign-load", action="store_true", help="init via safetensors mmap + load_state_dict(assign=True) — mirrors the real e2e init path")
     ap.add_argument("--layers", type=int, default=16)
     ap.add_argument("--dim", type=int, default=1024)
     ap.add_argument("--experts", type=int, default=32)
@@ -82,6 +83,16 @@ def main() -> None:
     # each block's expert params: 32*1024*512*2 * 2B(bf16 via DS) ≈ 67MB -> visible per-layer signal
     model = _Model(args.layers, args.dim, args.experts, args.inter, args.mode)
     install_expert_fakequant(model, mode="ternary", group_size=128)
+    if args.assign_load:
+        # mirror the real e2e init: save -> fresh model -> mmap safetensors -> assign-load
+        import safetensors.torch as st
+
+        st.save_file({k: v.contiguous() for k, v in model.state_dict().items()}, "/tmp/toy_ckpt.safetensors")
+        model = _Model(args.layers, args.dim, args.experts, args.inter, args.mode)
+        install_expert_fakequant(model, mode="ternary", group_size=128)
+        missing, unexpected = model.load_state_dict(st.load_file("/tmp/toy_ckpt.safetensors"), strict=False, assign=True)
+        assert not missing and not unexpected
+        print("assign-loaded toy from mmap safetensors")
     for p in model.parameters():
         p.requires_grad_(False)
     trainable = quant_parameters(model)
