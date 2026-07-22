@@ -90,27 +90,35 @@ def download_teacher_shards(repo: str, local_dir: str) -> str:  # pragma: no cov
     return f"{local_dir}/teacher_topk"
 
 
-def _zero3_config(*, micro_batch: int, accum: int) -> dict:
-    """DeepSpeed ZeRO-3 config: all training state on-GPU, sharded across ranks — NO offload.
+def _zero3_config(*, micro_batch: int, accum: int, offload_param: bool = False) -> dict:
+    """DeepSpeed ZeRO-3 config: training state on-GPU, sharded across ranks.
 
-    The optimizer is a *client* bnb ``Adam8bit`` (CUDA-only step; offload would break it), hence
-    ``zero_allow_untested_optimizer``. No ``optimizer`` block — DS must use the client instance.
-    ``sub_group_size`` stays at its 1e9 default (bnb kernels use 32-bit indexing internally).
-    Gradient clipping is DS's job (fp32 partition grads, pre-step); bnb clipping stays off.
+    The optimizer is a *client* bnb ``Adam8bit`` (CUDA-only step; optimizer offload would break
+    it — NEVER offload it), hence ``zero_allow_untested_optimizer``. No ``optimizer`` block —
+    DS must use the client instance. ``sub_group_size`` stays at its 1e9 default (bnb kernels
+    use 32-bit indexing internally). Gradient clipping is DS's job.
+
+    ``offload_param=True`` moves only the bf16 param *shards* to (pinned) CPU — gathered to GPU
+    per-module on demand. Costs ~PCIe transfer per step but frees ~9GB/rank resident: the knob
+    that closes the ~5GB backward-peak overshoot on 80GB A100s (H200s don't need it).
     """
+    zero: dict = {
+        "stage": 3,
+        "stage3_prefetch_bucket_size": 5e7,
+        "stage3_param_persistence_threshold": 1e5,
+        "stage3_max_live_parameters": 1e9,
+        "stage3_gather_16bit_weights_on_model_save": True,
+    }
+    if offload_param:
+        zero["offload_param"] = {"device": "cpu", "pin_memory": True}
+        zero["stage3_max_live_parameters"] = 3e8  # tighter live-gather cap while squeezed
     return {
         "train_micro_batch_size_per_gpu": micro_batch,
         "gradient_accumulation_steps": accum,
         "bf16": {"enabled": True},
         "gradient_clipping": 1.0,
         "zero_allow_untested_optimizer": True,
-        "zero_optimization": {
-            "stage": 3,
-            "stage3_prefetch_bucket_size": 5e7,
-            "stage3_param_persistence_threshold": 1e5,
-            "stage3_max_live_parameters": 1e9,
-            "stage3_gather_16bit_weights_on_model_save": True,
-        },
+        "zero_optimization": zero,
     }
 
 
@@ -158,6 +166,7 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     steps: int | None = None,
     micro_batch: int = 1,
     accum: int = 8,
+    offload_param: bool = False,
     out_dir: str = "outputs/e2e",
     push_repo: str | None = None,
     skip_save: bool = False,
@@ -251,7 +260,7 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     engine, _, _, _ = deepspeed.initialize(
         model=student,
         optimizer=opt,
-        config=_zero3_config(micro_batch=micro_batch, accum=accum),
+        config=_zero3_config(micro_batch=micro_batch, accum=accum, offload_param=offload_param),
     )
     device = engine.device
     _host_mem("sharded")

@@ -31,6 +31,7 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=200, help="total micro-steps (ignored for --smoke)")
     ap.add_argument("--micro-batch", type=int, default=1, help="keep at 1 — the memory budget assumes it")
     ap.add_argument("--accum", type=int, default=8)
+    ap.add_argument("--offload-param", action="store_true", help="offload bf16 param shards to CPU (needed on 80GB A100s; not on H200s)")
     ap.add_argument("--out", default="outputs/e2e")
     ap.add_argument("--push-repo", default=None)
     ap.add_argument("--skip-save", action="store_true")
@@ -49,6 +50,7 @@ def main() -> None:
         steps=args.steps,
         micro_batch=args.micro_batch,
         accum=args.accum,
+        offload_param=args.offload_param,
         out_dir=args.out,
         push_repo=args.push_repo,
         skip_save=args.skip_save,
