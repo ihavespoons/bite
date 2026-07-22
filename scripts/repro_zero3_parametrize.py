@@ -121,7 +121,9 @@ def main() -> None:
             blk.parametrizations.gate_up_proj.original.register_hook(bwd_probe(i))
 
     for step in range(3):
-        x = torch.randn(1, 512, args.dim, device=engine.device, dtype=torch.bfloat16)
+        # requires_grad mirrors enable_input_require_grads() in the real run: with reentrant
+        # checkpointing + frozen embed, the checkpoint chain needs a grad-requiring input
+        x = torch.randn(1, 512, args.dim, device=engine.device, dtype=torch.bfloat16, requires_grad=True)
         torch.cuda.reset_peak_memory_stats()
         out = engine(x)
         loss = out.float().pow(2).mean()
