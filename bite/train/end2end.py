@@ -138,9 +138,11 @@ def _host_mem(tag: str) -> None:  # pragma: no cover - runner-side telemetry
         pass
 
 
-def load_init_checkpoint(student, repo: str, out_dir: str) -> None:  # pragma: no cover - runner I/O
-    """Assign-load the block-wise-healed student checkpoint via safetensors mmap (read-only).
+def load_init_checkpoint(student, repo: str, out_dir: str, subdir: str = "qad_student") -> None:  # pragma: no cover - runner I/O
+    """Assign-load a student checkpoint via safetensors mmap (read-only).
 
+    ``subdir`` selects the init: ``qad_student`` (block-wise-healed, phase A) or ``e2e_student``
+    (a prior end-to-end phase's consolidated save, for phase-B/-N chaining).
     ``load_state_dict(..., assign=True)`` swaps the Parameter *objects* for mmap-backed tensors,
     so all ranks share the file page cache (~70GB total, not 70GB × ranks) and nothing is
     written on CPU. Anything collected from the model **before** this call (e.g. a
@@ -150,15 +152,15 @@ def load_init_checkpoint(student, repo: str, out_dir: str) -> None:  # pragma: n
     from huggingface_hub import snapshot_download
 
     snapshot_download(
-        repo_id=repo, repo_type="dataset", allow_patterns="qad_student/*", local_dir=out_dir
+        repo_id=repo, repo_type="dataset", allow_patterns=f"{subdir}/*", local_dir=out_dir
     )
     sd: dict = {}
-    for shard in sorted(glob.glob(f"{out_dir}/qad_student/*.safetensors")):
+    for shard in sorted(glob.glob(f"{out_dir}/{subdir}/*.safetensors")):
         sd.update(st.load_file(shard))  # zero-copy mmap on CPU
     missing, unexpected = student.load_state_dict(sd, strict=False, assign=True)
     real_missing = [k for k in missing if "inv_freq" not in k]  # non-persistent buffers are fine
     assert not unexpected and not real_missing, (real_missing[:5], list(unexpected)[:5])
-    print(f"assign-loaded {len(sd)} tensors from {repo}/qad_student (mmap, shared page cache)")
+    print(f"assign-loaded {len(sd)} tensors from {repo}/{subdir} (mmap, shared page cache)")
 
 
 def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
@@ -167,11 +169,13 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     model_id: str | None = None,
     teacher_repo: str | None = None,
     init_repo: str | None = None,
+    init_subdir: str = "qad_student",
     ptq_init: bool = False,
     steps: int | None = None,
     micro_batch: int = 1,
     accum: int = 8,
     offload_param: bool = False,
+    train_layers: str | None = None,
     mem_probe: bool = False,
     out_dir: str = "outputs/e2e",
     push_repo: str | None = None,
@@ -225,7 +229,7 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
         ptq_init_model(student, hessians=None, percdamp=config["ptq"]["percdamp"])
         ptq_init_experts(student)
     else:
-        load_init_checkpoint(student, init_repo or "ihavespoons/bite-baseline", out_dir)
+        load_init_checkpoint(student, init_repo or "ihavespoons/bite-baseline", out_dir, subdir=init_subdir)
         # Identity is proven by the strict key match in load_init_checkpoint (only our saved
         # student has parametrizations.*.original keys). The grid distance is telemetry only:
         # healed latents start on-grid at PTQ init and drift off-grid as block-wise QAD trains
@@ -256,6 +260,24 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     for p in student.parameters():
         p.requires_grad_(False)
     trainable = quant_parameters(student)
+    if train_layers:
+        # Phase filter, e.g. "0-19": DS ZeRO-3 materializes ~full-grad-sized reduction buffers
+        # on the first backward for every trainable param (structural, version-independent).
+        # Training all 40 layers' experts needs ~66GB/rank for them (h200x8 only); half the
+        # layers (~33GB) fits a100x8. Non-layer latents (lm_head) stay trainable in all phases.
+        lo, hi = (int(x) for x in train_layers.split("-"))
+        allowed = {f".layers.{i}." for i in range(lo, hi + 1)}
+        ids_by_name = {
+            id(p): name for name, p in student.named_parameters()
+        }
+        def _in_phase(p) -> bool:
+            name = ids_by_name.get(id(p), "")
+            if ".layers." not in name:
+                return True  # lm_head and other non-layer latents train in every phase
+            return any(tag in name for tag in allowed)
+
+        trainable = [p for p in trainable if _in_phase(p)]
+        print(f"phase filter layers {lo}-{hi}: {len(trainable)} trainable latents")
     for p in trainable:
         p.requires_grad_(True)
     print(f"student: {len(swapped)} linears + {len(experts)} expert tensors; {len(trainable)} trainable latents")

@@ -26,7 +26,9 @@ def main() -> None:
     ap.add_argument("--config", default="configs/ternary.yaml")
     ap.add_argument("--model", default=None)
     ap.add_argument("--teacher-repo", default=None, help="HF dataset with teacher_topk/ shards")
-    ap.add_argument("--init-repo", default="ihavespoons/bite-baseline", help="HF dataset with the qad_student/ init checkpoint")
+    ap.add_argument("--init-repo", default="ihavespoons/bite-baseline", help="HF dataset with the init checkpoint")
+    ap.add_argument("--init-subdir", default="qad_student", help="checkpoint subdir: qad_student (healed, phase A) | e2e_student (prior e2e phase)")
+    ap.add_argument("--train-layers", default=None, help="phase filter, e.g. 0-19: only these layers' latents train (DS grad buffers ~33GB/half -> fits a100x8)")
     ap.add_argument("--ptq-init", action="store_true", help="escape hatch: recompute naive PTQ init instead of loading the checkpoint (70GB CPU per rank)")
     ap.add_argument("--steps", type=int, default=200, help="total micro-steps (ignored for --smoke)")
     ap.add_argument("--micro-batch", type=int, default=1, help="keep at 1 — the memory budget assumes it")
@@ -47,6 +49,8 @@ def main() -> None:
         model_id=args.model,
         teacher_repo=args.teacher_repo,
         init_repo=args.init_repo,
+        init_subdir=args.init_subdir,
+        train_layers=args.train_layers,
         ptq_init=args.ptq_init,
         steps=args.steps,
         micro_batch=args.micro_batch,
