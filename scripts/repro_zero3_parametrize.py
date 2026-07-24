@@ -130,6 +130,7 @@ def main() -> None:
     ap.add_argument("--real-moe", default=None, choices=(None, "grouped_mm", "batched_mm"), help="use the REAL transformers Qwen3_5MoeSparseMoeBlock with this experts implementation")
     ap.add_argument("--deltanet", action="store_true", help="add the REAL Qwen3_5MoeGatedDeltaNet to each block (fla chunk kernel when installed)")
     ap.add_argument("--no-contig-grads", action="store_true", help="contiguous_gradients=False (pending-grad copy behavior test)")
+    ap.add_argument("--ds-optimizer", action="store_true", help="use DS's own config-block AdamW instead of a client bnb optimizer (tests whether the untested-client path disables mid-backward reduction)")
     ap.add_argument("--layers", type=int, default=16)
     ap.add_argument("--dim", type=int, default=1024)
     ap.add_argument("--experts", type=int, default=32)
@@ -161,15 +162,24 @@ def main() -> None:
     model.train()
     print(f"toy: {args.layers} blocks, {len(trainable)} trainable latents, mode={args.mode}")
 
-    opt = bnb.optim.Adam8bit(trainable, lr=1e-4)
-    engine, _, _, _ = deepspeed.initialize(
+    ds_kwargs: dict = {}
+    config: dict = {}
+    if args.ds_optimizer:
+        config["optimizer"] = {"type": "AdamW", "params": {"lr": 1e-4}}
+        ds_kwargs["model_parameters"] = trainable
+        opt = None
+    else:
+        opt = bnb.optim.Adam8bit(trainable, lr=1e-4)
+        ds_kwargs["optimizer"] = opt
+        config["zero_allow_untested_optimizer"] = True
+    engine, opt, _, _ = deepspeed.initialize(
         model=model,
-        optimizer=opt,
+        **ds_kwargs,
         config={
+            **config,
             "train_micro_batch_size_per_gpu": 1,
             "gradient_accumulation_steps": args.accum,
             "bf16": {"enabled": True},
-            "zero_allow_untested_optimizer": True,
             "zero_optimization": {
                 "stage": 3,
                 "reduce_bucket_size": args.reduce_bucket,
@@ -209,8 +219,11 @@ def main() -> None:
     # verdict: healthy = bwd-block prints roughly FLAT and step peaks stable across steps;
     # leak = monotone climb through bwd blocks (late blocks are processed FIRST in backward,
     # so a climb from high block idx down to 0 mirrors the 35B failure)
-    st = {v.dtype for s in opt.state.values() for v in s.values() if torch.is_tensor(v)}
-    print(f"bnb state dtypes: {st}")
+    try:
+        st = {v.dtype for s in opt.state.values() for v in s.values() if torch.is_tensor(v)}
+        print(f"optimizer state dtypes: {st}")
+    except AttributeError:
+        print("optimizer state dtypes: n/a (DS-wrapped)")
     print("REPRO DONE")
 
 
