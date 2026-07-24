@@ -194,10 +194,40 @@ def main() -> None:
     )
     print(f"post-shard alloc {torch.cuda.memory_allocated() / 1e9:.2f}GB")
 
+    # wrap DS's reduce to count mid-backward fires
+    from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3 as _S3
+
+    fires = {"n": 0}
+    _orig_reduce = _S3._DeepSpeedZeroOptimizer_Stage3__reduce_and_partition_ipg_grads
+
+    def _counting_reduce(self, *a, **kw):
+        fires["n"] += 1
+        return _orig_reduce(self, *a, **kw)
+
+    _S3._DeepSpeedZeroOptimizer_Stage3__reduce_and_partition_ipg_grads = _counting_reduce
+
+    from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+
+    all_params = list(engine.module.parameters())
+
+    def _mem_classes():
+        gathered = sum(
+            p.ds_numel * 2 for p in all_params
+            if hasattr(p, "ds_status") and p.ds_status == ZeroParamStatus.AVAILABLE
+        )
+        grads = sum(
+            p.grad.numel() * p.grad.element_size() for p in all_params if p.grad is not None
+        )
+        return gathered / 1e9, grads / 1e9
+
     # per-block BACKWARD memory: hook on each block's first param's grad
     def bwd_probe(i):
         def hook(_g):
-            print(f"  bwd block {i}: alloc {torch.cuda.memory_allocated() / 1e9:.2f}GB")
+            g, gr = _mem_classes()
+            print(
+                f"  bwd block {i}: alloc {torch.cuda.memory_allocated() / 1e9:.2f}GB "
+                f"gathered={g:.2f}GB grads={gr:.2f}GB reduces={fires['n']}"
+            )
             return None
 
         return hook
