@@ -31,9 +31,10 @@ class _RealMoeBlock(nn.Module):
     """QuantLinear attn + the REAL transformers Qwen3_5MoeSparseMoeBlock (router + grouped-GEMM
     experts + shared expert) — reproduces the exact MoE compute path of the 35B runs."""
 
-    def __init__(self, d: int, E: int, inter: int, group_size: int, impl: str):
+    def __init__(self, d: int, E: int, inter: int, group_size: int, impl: str, deltanet: bool = False):
         super().__init__()
         from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+            Qwen3_5MoeGatedDeltaNet,
             Qwen3_5MoeSparseMoeBlock,
             Qwen3_5MoeTextConfig,
         )
@@ -45,14 +46,24 @@ class _RealMoeBlock(nn.Module):
             num_experts_per_tok=4,
             shared_expert_intermediate_size=inter // 2,
             hidden_act="silu",
+            linear_num_key_heads=4,
+            linear_num_value_heads=8,
+            linear_key_head_dim=64,
+            linear_value_head_dim=64,
+            linear_conv_kernel_dim=4,
         )
         cfg._experts_implementation = impl  # 'grouped_mm' (real path) | 'batched_mm' (candidate fix)
         self.attn = QuantLinear(d, d, bias=False, mode="ternary", group_size=group_size)
+        # real GatedDeltaNet (uses the fla chunk kernel when installed — the real 35B path)
+        self.deltanet = Qwen3_5MoeGatedDeltaNet(cfg, layer_idx=0) if deltanet else None
         self.moe = Qwen3_5MoeSparseMoeBlock(cfg)
         self.norm = nn.LayerNorm(d)
 
     def forward(self, x):
         h = self.attn(x)
+        if self.deltanet is not None:
+            dn = self.deltanet(h)
+            h = h + (dn[0] if isinstance(dn, tuple) else dn)
         out = self.moe(h)
         out = out[0] if isinstance(out, tuple) else out
         return self.norm(x + out)
@@ -85,10 +96,11 @@ class _Model(nn.Module):
         mode: str,
         group_size: int = 128,
         moe_impl: str | None = None,
+        deltanet: bool = False,
     ):
         super().__init__()
         self.embed = nn.Linear(d, d, bias=False)
-        mk = (lambda: _RealMoeBlock(d, E, inter, group_size, moe_impl)) if moe_impl else (
+        mk = (lambda: _RealMoeBlock(d, E, inter, group_size, moe_impl, deltanet=deltanet)) if moe_impl else (
             lambda: _Block(d, E, inter, group_size)
         )
         self.blocks = nn.ModuleList(mk() for _ in range(n_layers))
@@ -116,6 +128,7 @@ def main() -> None:
     ap.add_argument("--reduce-bucket", type=float, default=5e8, help="reduce_bucket_size; set BELOW param numel to test the oversized-grad path")
     ap.add_argument("--max-live", type=float, default=1e8, help="stage3_max_live_parameters; set BELOW param numel to test oversized-param release")
     ap.add_argument("--real-moe", default=None, choices=(None, "grouped_mm", "batched_mm"), help="use the REAL transformers Qwen3_5MoeSparseMoeBlock with this experts implementation")
+    ap.add_argument("--deltanet", action="store_true", help="add the REAL Qwen3_5MoeGatedDeltaNet to each block (fla chunk kernel when installed)")
     ap.add_argument("--layers", type=int, default=16)
     ap.add_argument("--dim", type=int, default=1024)
     ap.add_argument("--experts", type=int, default=32)
@@ -127,7 +140,7 @@ def main() -> None:
     import deepspeed
 
     # each block's expert params: 32*1024*512*2 * 2B(bf16 via DS) ≈ 67MB -> visible per-layer signal
-    model = _Model(args.layers, args.dim, args.experts, args.inter, args.mode, moe_impl=args.real_moe)
+    model = _Model(args.layers, args.dim, args.experts, args.inter, args.mode, moe_impl=args.real_moe, deltanet=args.deltanet)
     install_expert_fakequant(model, mode="ternary", group_size=128)
     if args.assign_load:
         # mirror the real e2e init: save -> fresh model -> mmap safetensors -> assign-load
