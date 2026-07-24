@@ -160,7 +160,7 @@ def main() -> None:
     for p in trainable:
         p.requires_grad_(True)
     model.train()
-    print(f"toy: {args.layers} blocks, {len(trainable)} trainable latents, mode={args.mode}")
+    print(f"toy: {args.layers} blocks, {len(trainable)} trainable latents, mode={args.mode}, deepspeed={deepspeed.__version__}")
 
     ds_kwargs: dict = {}
     config: dict = {}

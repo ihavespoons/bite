@@ -62,6 +62,7 @@ def main() -> None:
     ap.add_argument("--model", default="Qwen/Qwen3.6-35B-A3B")
     ap.add_argument("--mount-model", action="store_true", help="mount the model repo at /model")
     ap.add_argument("--num-gpus", type=int, default=1, help="GPUs for the deepspeed launcher (e2e stage)")
+    ap.add_argument("--extra-pip", default="", help="extra pip spec(s) installed AFTER the project extras (e.g. 'deepspeed==0.15.4' to override a resolved version)")
     ap.add_argument("--extra-args", default="", help="appended to the stage command")
     args = ap.parse_args()
 
@@ -75,10 +76,11 @@ def main() -> None:
 
     gh = os.environ.get("GITHUB_TOKEN", "")
     clone_url = f"https://x-access-token:${{GITHUB_TOKEN}}@{REPO}" if gh else f"https://{REPO}"
+    extra_pip = f"pip install -q {args.extra_pip}; " if args.extra_pip else ""
     inner = (
         "set -e; apt-get -qq update && apt-get -qq install -y git >/dev/null 2>&1; "
         f"git clone -q --branch {args.ref} {clone_url}; cd bite; "
-        f"pip install -q -e '.[{extras}]'; {stage_cmd}"
+        f"pip install -q -e '.[{extras}]'; {extra_pip}{stage_cmd}"
     )
 
     secrets = {k: os.environ[k] for k in ("GITHUB_TOKEN", "HF_TOKEN") if os.environ.get(k)}
