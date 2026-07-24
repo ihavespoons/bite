@@ -37,9 +37,10 @@ STAGES = {
         "model,eval",
         "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python scripts/eval_quant.py --config {config} {extra}",
     ),
-    # toy ZeRO-3+parametrize leak repro (t4-small, pennies)
+    # toy ZeRO-3+parametrize leak repro (a10g-small, pennies); model extra for the real
+    # transformers Qwen MoE block (--real-moe)
     "repro": (
-        "train",
+        "model,train",
         "deepspeed --num_gpus=1 scripts/repro_zero3_parametrize.py {extra}",
     ),
     # end-to-end QAD: needs fla (DeltaNet backward), deepspeed (ZeRO-3 offload), eval; launched

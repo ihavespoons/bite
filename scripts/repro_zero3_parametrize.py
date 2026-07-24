@@ -27,6 +27,37 @@ from bite.quant.quantlinear import QuantLinear
 from bite.train.blockwise import quant_parameters
 
 
+class _RealMoeBlock(nn.Module):
+    """QuantLinear attn + the REAL transformers Qwen3_5MoeSparseMoeBlock (router + grouped-GEMM
+    experts + shared expert) — reproduces the exact MoE compute path of the 35B runs."""
+
+    def __init__(self, d: int, E: int, inter: int, group_size: int, impl: str):
+        super().__init__()
+        from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import (
+            Qwen3_5MoeSparseMoeBlock,
+            Qwen3_5MoeTextConfig,
+        )
+
+        cfg = Qwen3_5MoeTextConfig(
+            hidden_size=d,
+            moe_intermediate_size=inter,
+            num_experts=E,
+            num_experts_per_tok=4,
+            shared_expert_intermediate_size=inter // 2,
+            hidden_act="silu",
+        )
+        cfg._experts_implementation = impl  # 'grouped_mm' (real path) | 'batched_mm' (candidate fix)
+        self.attn = QuantLinear(d, d, bias=False, mode="ternary", group_size=group_size)
+        self.moe = Qwen3_5MoeSparseMoeBlock(cfg)
+        self.norm = nn.LayerNorm(d)
+
+    def forward(self, x):
+        h = self.attn(x)
+        out = self.moe(h)
+        out = out[0] if isinstance(out, tuple) else out
+        return self.norm(x + out)
+
+
 class _Block(nn.Module):
     """Toy decoder block: QuantLinear attn + parametrized fused 3D expert param (the combo)."""
 
@@ -45,10 +76,22 @@ class _Block(nn.Module):
 
 
 class _Model(nn.Module):
-    def __init__(self, n_layers: int, d: int, E: int, inter: int, mode: str, group_size: int = 128):
+    def __init__(
+        self,
+        n_layers: int,
+        d: int,
+        E: int,
+        inter: int,
+        mode: str,
+        group_size: int = 128,
+        moe_impl: str | None = None,
+    ):
         super().__init__()
         self.embed = nn.Linear(d, d, bias=False)
-        self.blocks = nn.ModuleList(_Block(d, E, inter, group_size) for _ in range(n_layers))
+        mk = (lambda: _RealMoeBlock(d, E, inter, group_size, moe_impl)) if moe_impl else (
+            lambda: _Block(d, E, inter, group_size)
+        )
+        self.blocks = nn.ModuleList(mk() for _ in range(n_layers))
         self.mode = mode
 
     def forward(self, x):
@@ -72,6 +115,7 @@ def main() -> None:
     ap.add_argument("--assign-load", action="store_true", help="init via safetensors mmap + load_state_dict(assign=True) — mirrors the real e2e init path")
     ap.add_argument("--reduce-bucket", type=float, default=5e8, help="reduce_bucket_size; set BELOW param numel to test the oversized-grad path")
     ap.add_argument("--max-live", type=float, default=1e8, help="stage3_max_live_parameters; set BELOW param numel to test oversized-param release")
+    ap.add_argument("--real-moe", default=None, choices=(None, "grouped_mm", "batched_mm"), help="use the REAL transformers Qwen3_5MoeSparseMoeBlock with this experts implementation")
     ap.add_argument("--layers", type=int, default=16)
     ap.add_argument("--dim", type=int, default=1024)
     ap.add_argument("--experts", type=int, default=32)
@@ -83,7 +127,7 @@ def main() -> None:
     import deepspeed
 
     # each block's expert params: 32*1024*512*2 * 2B(bf16 via DS) ≈ 67MB -> visible per-layer signal
-    model = _Model(args.layers, args.dim, args.experts, args.inter, args.mode)
+    model = _Model(args.layers, args.dim, args.experts, args.inter, args.mode, moe_impl=args.real_moe)
     install_expert_fakequant(model, mode="ternary", group_size=128)
     if args.assign_load:
         # mirror the real e2e init: save -> fresh model -> mmap safetensors -> assign-load
@@ -133,7 +177,7 @@ def main() -> None:
 
     for i, blk in enumerate(engine.module.blocks):
         if i % 4 == 0:
-            blk.parametrizations.gate_up_proj.original.register_hook(bwd_probe(i))
+            quant_parameters(blk)[-1].register_hook(bwd_probe(i))
 
     for step in range(2 * args.accum + 1):  # cross at least two optimizer-step boundaries
         # requires_grad mirrors enable_input_require_grads() in the real run: with reentrant
