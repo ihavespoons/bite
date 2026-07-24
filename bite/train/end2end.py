@@ -242,14 +242,14 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     if hasattr(student, "config"):
         student.config.use_cache = False
     if hasattr(student, "gradient_checkpointing_enable"):
-        # use_reentrant=True: the non-reentrant variant's saved-tensor metadata check breaks
-        # under ZeRO-3 (params are re-partitioned to numel-0 after each module forward, so the
-        # backward recompute sees different metadata -> CheckpointError). Reentrant + ZeRO-3 is
-        # the battle-tested combo (HF Trainer default).
-        student.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
+        # NON-reentrant + determinism_check="none" (toy-validated combo): ZeRO-3 re-partitions
+        # params between save and recompute so the metadata check always trips — skip it. The
+        # gathered-param release during backward is handled by the per-block hooks below.
+        student.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False, "determinism_check": "none"}
+        )
     if hasattr(student, "enable_input_require_grads"):
-        # reentrant checkpointing needs a grad-requiring input to anchor each block's backward;
-        # our embeddings are frozen, so mark the embedding OUTPUT (standard PEFT-style fix)
+        # anchor each checkpointed block's backward despite frozen embeddings
         student.enable_input_require_grads()
     # from_pretrained returns the model in EVAL mode and transformers gates checkpointing on
     # self.training — without train() every layer's fake-quant weight output (~1.6GB × 40
@@ -300,6 +300,33 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     print(f"post-shard resident {resident:.1f}GB/GPU "
           f"(checkpointing={getattr(engine.module, 'is_gradient_checkpointing', '?')})")
     assert resident < 40, f"params not sharded: {resident:.1f}GB resident (expect ~shard size)"
+
+    # Per-block gathered-param release (toy-validated). During the coordinator's trace-recording
+    # first iteration, DS never releases gathered params in backward — for 40 layers that hoards
+    # ~64GB and OOMs any 80GB card. Once a block's backward is done (blocks run in reverse) its
+    # params aren't needed until the next forward: force-clear the submodule bookkeeping (DS's
+    # own release_and_reset_all pattern) and partition. Idempotent with DS's own release.
+    from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+
+    from bite.train.blockwise import iter_blocks
+
+    def _release_hook(blk):
+        def hook(_m, _gin, _gout):
+            for p in blk.parameters():
+                if (
+                    hasattr(p, "ds_status")
+                    and p.ds_status == ZeroParamStatus.AVAILABLE
+                    and not p.ds_persist
+                ):
+                    p.ds_active_sub_modules.clear()
+                    p.partition()
+
+        return hook
+
+    release_blocks = iter_blocks(engine.module, config["qad"].get("layers_path"))
+    for blk in release_blocks:
+        blk.register_full_backward_hook(_release_hook(blk))
+    print(f"per-block gathered-param release hooks on {len(release_blocks)} blocks")
 
     import torch.distributed as dist
 
