@@ -247,6 +247,9 @@ def main() -> None:
             def hook(_m, _gin, _gout):
                 for p in blk.parameters():
                     if hasattr(p, "ds_status") and p.ds_status == ZeroParamStatus.AVAILABLE and not p.ds_persist:
+                        # force-clear the submodule bookkeeping first — DS's own
+                        # release_and_reset_all does the same ("hook execution issue")
+                        p.ds_active_sub_modules.clear()
                         p.partition()
 
             return hook
