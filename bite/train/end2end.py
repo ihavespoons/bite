@@ -339,7 +339,7 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
         for i, blk in enumerate(blocks):
             if i % 4 == 0:
                 blk.register_forward_pre_hook(_fwd_probe(i), with_kwargs=True)
-            bp = _qp(blk)
+            bp = [p for p in _qp(blk) if p.requires_grad]  # phase-frozen layers can't take grad hooks
             if bp:
                 bp[0].register_hook(_bwd_probe(i))
         print(f"mem probes on {len(blocks)} blocks (fwd every 4th, bwd all)")
