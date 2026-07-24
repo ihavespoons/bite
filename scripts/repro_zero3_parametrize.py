@@ -129,6 +129,7 @@ def main() -> None:
     ap.add_argument("--max-live", type=float, default=1e8, help="stage3_max_live_parameters; set BELOW param numel to test oversized-param release")
     ap.add_argument("--real-moe", default=None, choices=(None, "grouped_mm", "batched_mm"), help="use the REAL transformers Qwen3_5MoeSparseMoeBlock with this experts implementation")
     ap.add_argument("--deltanet", action="store_true", help="add the REAL Qwen3_5MoeGatedDeltaNet to each block (fla chunk kernel when installed)")
+    ap.add_argument("--no-contig-grads", action="store_true", help="contiguous_gradients=False (pending-grad copy behavior test)")
     ap.add_argument("--layers", type=int, default=16)
     ap.add_argument("--dim", type=int, default=1024)
     ap.add_argument("--experts", type=int, default=32)
@@ -172,6 +173,7 @@ def main() -> None:
             "zero_optimization": {
                 "stage": 3,
                 "reduce_bucket_size": args.reduce_bucket,
+                "contiguous_gradients": not args.no_contig_grads,
                 "stage3_prefetch_bucket_size": 5e6,
                 "stage3_param_persistence_threshold": 1e4,
                 "stage3_max_live_parameters": args.max_live,
