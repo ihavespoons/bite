@@ -135,6 +135,7 @@ def main() -> None:
     ap.add_argument("--no-contig-grads", action="store_true", help="contiguous_gradients=False (pending-grad copy behavior test)")
     ap.add_argument("--ds-optimizer", action="store_true", help="use DS's own config-block AdamW instead of a client bnb optimizer (tests whether the untested-client path disables mid-backward reduction)")
     ap.add_argument("--max-reuse", type=float, default=1e9, help="stage3_max_reuse_distance; 0 forces immediate release of gathered params (hoarding test)")
+    ap.add_argument("--manual-release", action="store_true", help="full-backward-hook per block: partition() its gathered params once the block's backward is done (bounds the step-0 trace-recording hoard)")
     ap.add_argument("--layers", type=int, default=16)
     ap.add_argument("--dim", type=int, default=1024)
     ap.add_argument("--experts", type=int, default=32)
@@ -237,6 +238,22 @@ def main() -> None:
 
     for i, blk in enumerate(engine.module.blocks):
         quant_parameters(blk)[-1].register_hook(bwd_probe(i))  # every block: monotone-vs-flat read
+
+    if args.manual_release:
+        # After a block's backward completes (blocks run in reverse), its params are not needed
+        # until the next forward — partition them immediately instead of letting the coordinator
+        # hoard them through the trace-recording first iteration.
+        def release_hook(blk):
+            def hook(_m, _gin, _gout):
+                for p in blk.parameters():
+                    if hasattr(p, "ds_status") and p.ds_status == ZeroParamStatus.AVAILABLE and not p.ds_persist:
+                        p.partition()
+
+            return hook
+
+        for blk in engine.module.blocks:
+            blk.register_full_backward_hook(release_hook(blk))
+        print("manual per-block param release: ON")
 
     for step in range(2 * args.accum + 1):  # cross at least two optimizer-step boundaries
         # requires_grad mirrors enable_input_require_grads() in the real run: with reentrant
