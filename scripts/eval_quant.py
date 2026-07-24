@@ -73,7 +73,8 @@ def main() -> None:  # pragma: no cover - runner
     ap.add_argument("--model", default=None)
     ap.add_argument("--eval-tasks", default="mmlu")
     ap.add_argument("--variant", default="both", choices=("both", "ternary", "fp16"), help="which lm_head variant(s) to eval")
-    ap.add_argument("--load-weights", default=None, help="eval a QAD-trained consolidated checkpoint (safetensors) instead of PTQ-init")
+    ap.add_argument("--load-weights", default=None, help="eval a QAD-trained consolidated checkpoint (safetensors) instead of PTQ-init; local path or repo-relative (downloaded from --load-repo)")
+    ap.add_argument("--load-repo", default="ihavespoons/bite-baseline", help="HF dataset to download --load-weights from when not a local path")
     ap.add_argument("--eval-limit", type=int, default=100, help="examples per MMLU subtask (fast directional read)")
     ap.add_argument("--out", default="outputs/diag/eval_quant.json")
     ap.add_argument("--push-repo", default=None)
@@ -91,8 +92,14 @@ def main() -> None:  # pragma: no cover - runner
 
     results = []
     if args.load_weights:
+        weights = args.load_weights
+        if not os.path.exists(weights):
+            from huggingface_hub import hf_hub_download
+
+            weights = hf_hub_download(args.load_repo, weights, repo_type="dataset")
+            print(f"downloaded checkpoint: {weights}")
         results.append(
-            _eval_variant(model_id, cfg, tokenizer, keep_lmhead=False, tasks=tasks, limit=args.eval_limit, load_weights=args.load_weights)
+            _eval_variant(model_id, cfg, tokenizer, keep_lmhead=False, tasks=tasks, limit=args.eval_limit, load_weights=weights)
         )
     else:
         variants = {"both": (False, True), "ternary": (False,), "fp16": (True,)}[args.variant]
