@@ -131,6 +131,7 @@ def main() -> None:
     ap.add_argument("--deltanet", action="store_true", help="add the REAL Qwen3_5MoeGatedDeltaNet to each block (fla chunk kernel when installed)")
     ap.add_argument("--no-contig-grads", action="store_true", help="contiguous_gradients=False (pending-grad copy behavior test)")
     ap.add_argument("--ds-optimizer", action="store_true", help="use DS's own config-block AdamW instead of a client bnb optimizer (tests whether the untested-client path disables mid-backward reduction)")
+    ap.add_argument("--max-reuse", type=float, default=1e9, help="stage3_max_reuse_distance; 0 forces immediate release of gathered params (hoarding test)")
     ap.add_argument("--layers", type=int, default=16)
     ap.add_argument("--dim", type=int, default=1024)
     ap.add_argument("--experts", type=int, default=32)
@@ -187,6 +188,7 @@ def main() -> None:
                 "stage3_prefetch_bucket_size": 5e6,
                 "stage3_param_persistence_threshold": 1e4,
                 "stage3_max_live_parameters": args.max_live,
+                "stage3_max_reuse_distance": args.max_reuse,
             },
         },
     )
