@@ -112,7 +112,10 @@ class _Model(nn.Module):
             if self.mode == "reentrant":
                 h = checkpoint(blk, h, use_reentrant=True)
             elif self.mode == "nonreentrant":
-                h = checkpoint(blk, h, use_reentrant=False)
+                # determinism_check="none": ZeRO-3 re-partitions params between save and
+                # recompute, so the metadata comparison always trips — skip it. Non-reentrant
+                # is the mode where DS releases gathered params during backward.
+                h = checkpoint(blk, h, use_reentrant=False, determinism_check="none")
             else:
                 h = blk(h)
             if i % 4 == 0:
