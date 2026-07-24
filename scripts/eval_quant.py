@@ -33,10 +33,16 @@ def _eval_variant(model_id, cfg, tokenizer, *, keep_lmhead: bool, tasks, limit, 
     )
     if load_weights:
         # eval a QAD-trained checkpoint: rebuild the fake-quant structure, then load the trained
-        # latents (the parametrizations re-apply fake-quant on forward). Consolidated e2e save.
-        import safetensors.torch as st
+        # latents (the parametrizations re-apply fake-quant on forward). NOTE: DeepSpeed's
+        # save_16bit_model writes a torch pickle regardless of the filename's extension.
+        try:
+            import safetensors.torch as st
 
-        missing, unexpected = student.load_state_dict(st.load_file(load_weights), strict=False)
+            sd = st.load_file(load_weights)
+        except Exception:
+            sd = torch.load(load_weights, map_location="cpu", weights_only=True)
+            print("loaded as torch pickle (DeepSpeed save_16bit_model format)")
+        missing, unexpected = student.load_state_dict(sd, strict=False)
         tag = f"e2e-trained (missing={len(missing)}, unexpected={len(unexpected)})"
         print(f"[{tag}] loaded {load_weights}")
     else:
