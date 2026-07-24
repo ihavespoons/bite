@@ -41,7 +41,7 @@ STAGES = {
     # transformers Qwen MoE block (--real-moe)
     "repro": (
         "model,qad,train",
-        "deepspeed --num_gpus=1 scripts/repro_zero3_parametrize.py {extra}",
+        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True deepspeed --num_gpus=1 scripts/repro_zero3_parametrize.py {extra}",
     ),
     # end-to-end QAD: needs fla (DeltaNet backward), deepspeed (ZeRO-3 offload), eval; launched
     # via the deepspeed launcher so torch.distributed is set up (single GPU is fine).

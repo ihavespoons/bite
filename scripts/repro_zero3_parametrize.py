@@ -189,8 +189,7 @@ def main() -> None:
         return hook
 
     for i, blk in enumerate(engine.module.blocks):
-        if i % 4 == 0:
-            quant_parameters(blk)[-1].register_hook(bwd_probe(i))
+        quant_parameters(blk)[-1].register_hook(bwd_probe(i))  # every block: monotone-vs-flat read
 
     for step in range(2 * args.accum + 1):  # cross at least two optimizer-step boundaries
         # requires_grad mirrors enable_input_require_grads() in the real run: with reentrant
