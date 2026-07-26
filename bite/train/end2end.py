@@ -445,7 +445,7 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     step = 0
     seqs_seen = 0
     buf: list[dict] = []
-    t_last = time.time()
+    t_last, t_step = time.time(), 0
     done = False
     while not done:
         # rank-aware data-parallel sharding: contiguous micro_batch-sized chunks of the shared
@@ -469,8 +469,8 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
                 if step % 10 == 0 or smoke:
                     alloc = torch.cuda.max_memory_allocated() / 1e9
                     now = time.time()
-                    toks = 10 * micro_batch * world * input_ids.shape[1] / max(now - t_last, 1e-9)
-                    t_last = now
+                    toks = (step - t_step) * micro_batch * world * input_ids.shape[1] / max(now - t_last, 1e-9)
+                    t_last, t_step = now, step
                     print(
                         f"step {step}: loss {float(loss.detach()):.4f} (kl {parts['kl']:.4f} "
                         f"ce {parts['ce']:.4f}) peak {alloc:.0f}GB ~{toks / 1e3:.1f}K tok/s"
