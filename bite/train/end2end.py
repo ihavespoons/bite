@@ -77,17 +77,19 @@ def iter_shard_examples(shard_dir: str) -> Iterator[dict]:  # pragma: no cover -
             }
 
 
-def download_teacher_shards(repo: str, local_dir: str) -> str:  # pragma: no cover - runner I/O
-    """Download the ``teacher_topk/`` folder of an HF dataset for training."""
+def download_teacher_shards(
+    repo: str, local_dir: str, name: str = "teacher_topk"
+) -> str:  # pragma: no cover - runner I/O
+    """Download a teacher-shard folder (e.g. ``teacher_topk_slope/``) of an HF dataset."""
     from huggingface_hub import snapshot_download
 
     snapshot_download(
         repo_id=repo,
         repo_type="dataset",
-        allow_patterns="teacher_topk/*",
+        allow_patterns=f"{name}/*",
         local_dir=local_dir,
     )
-    return f"{local_dir}/teacher_topk"
+    return f"{local_dir}/{name}"
 
 
 def _zero3_config(*, micro_batch: int, accum: int, offload_param: bool = False) -> dict:
@@ -168,6 +170,7 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     *,
     model_id: str | None = None,
     teacher_repo: str | None = None,
+    shards_name: str = "teacher_topk",
     init_repo: str | None = None,
     init_subdir: str = "qad_student",
     ptq_init: bool = False,
@@ -342,7 +345,11 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
 
     rank = dist.get_rank() if dist.is_initialized() else 0
     world = dist.get_world_size() if dist.is_initialized() else 1
-    shard_dir = download_teacher_shards(teacher_repo, out_dir) if teacher_repo else f"{out_dir}/teacher_topk"
+    shard_dir = (
+        download_teacher_shards(teacher_repo, out_dir, shards_name)
+        if teacher_repo
+        else f"{out_dir}/{shards_name}"
+    )
     w_kl = float(lw.get("kl", 1.0))
     w_ce = float(lw.get("ce", 0.5))
 

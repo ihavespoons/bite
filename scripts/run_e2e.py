@@ -26,6 +26,7 @@ def main() -> None:
     ap.add_argument("--config", default="configs/ternary.yaml")
     ap.add_argument("--model", default=None)
     ap.add_argument("--teacher-repo", default=None, help="HF dataset with teacher_topk/ shards")
+    ap.add_argument("--shards-name", default="teacher_topk", help="shard folder in --teacher-repo (e.g. teacher_topk_slope)")
     ap.add_argument("--init-repo", default="ihavespoons/bite-baseline", help="HF dataset with the init checkpoint")
     ap.add_argument("--init-subdir", default="qad_student", help="checkpoint subdir: qad_student (healed, phase A) | e2e_student (prior e2e phase)")
     ap.add_argument("--train-layers", default=None, help="phase filter, e.g. 0-19: only these layers' latents train (DS grad buffers ~33GB/half -> fits a100x8)")
@@ -49,6 +50,7 @@ def main() -> None:
         cfg,
         model_id=args.model,
         teacher_repo=args.teacher_repo,
+        shards_name=args.shards_name,
         init_repo=args.init_repo,
         init_subdir=args.init_subdir,
         train_layers=args.train_layers,
