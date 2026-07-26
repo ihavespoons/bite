@@ -4,7 +4,10 @@
 defaults: base.yaml
 quant:
   mode: ternary
-  # ternary_threshold: optimal   # enable once the absmean-vs-optimal A/B (eval_rules.json) confirms
+  # A/B (jobs 6a65d914/6a65d915, PTQ-only floor): optimal MMLU 0.2695 vs absmean 0.2532 —
+  # first above-chance PTQ signal; wikitext ppl slightly worse (1.95M -> 2.25M word ppl), so
+  # weight-MSE is nearly exhausted as an init lever. MMLU is primary -> optimal it is.
+  ternary_threshold: optimal
 
 calibration:
   seq_len: 2048
