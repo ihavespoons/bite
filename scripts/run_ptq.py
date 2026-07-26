@@ -25,6 +25,7 @@ def main() -> None:  # pragma: no cover - runner-side
     ap.add_argument("--skip-save", action="store_true", help="don't write the 70GB student (validation)")
     ap.add_argument("--teacher-only", action="store_true", help="only precompute teacher logits (skip student/coverage/PTQ)")
     ap.add_argument("--shards-name", default="teacher_topk", help="local subdir + repo path for the shards (use e.g. teacher_topk_slope for fresh slope-run data)")
+    ap.add_argument("--student-name", default=None, help="also upload the saved PTQ student to --push-repo under this path (e.g. ptq_student_optimal); default: don't upload")
     ap.add_argument("--shard-start", type=int, default=0, help="shard filename start index (multi-job generation)")
     ap.add_argument("--push-repo", default=None, help="HF dataset repo to persist coverage + teacher logits")
     args = ap.parse_args()
@@ -51,7 +52,10 @@ def main() -> None:  # pragma: no cover - runner-side
     if not args.teacher_only:
         # 1. student: QuantLinear (attention/lm-head) + fused-expert fake-quant (the MoE bulk)
         student, swapped, experts = build_student(
-            model_id, mode=cfg["quant"]["mode"], group_size=cfg["quant"]["group_size"]
+            model_id,
+            mode=cfg["quant"]["mode"],
+            group_size=cfg["quant"]["group_size"],
+            threshold_ratio=cfg["quant"].get("ternary_threshold"),
         )
         device = str(next(student.parameters()).device)
         print(f"quantized {len(swapped)} linears + {len(experts)} fused-expert tensors ({cfg['quant']['mode']})")
@@ -115,6 +119,15 @@ def main() -> None:  # pragma: no cover - runner-side
             api.upload_folder(
                 folder_path=f"{args.out}/{args.shards_name}",
                 path_in_repo=args.shards_name,
+                repo_id=args.push_repo,
+                repo_type="dataset",
+            )
+        if args.student_name and not args.skip_save and not args.teacher_only:
+            # the PTQ student (incl. parametrizations.*.original latents) becomes an e2e init:
+            # run_e2e --init-repo <push-repo> --init-subdir <student-name>
+            api.upload_folder(
+                folder_path=f"{args.out}/student",
+                path_in_repo=args.student_name,
                 repo_id=args.push_repo,
                 repo_type="dataset",
             )

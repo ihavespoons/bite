@@ -234,7 +234,10 @@ def run_blockwise_qad(  # pragma: no cover - requires model + GPU
 
     # 1. PTQ-init student on GPU
     student, swapped, experts = build_student(
-        mid, mode=config["quant"]["mode"], group_size=config["quant"]["group_size"]
+        mid,
+        mode=config["quant"]["mode"],
+        group_size=config["quant"]["group_size"],
+        threshold_ratio=config["quant"].get("ternary_threshold"),
     )
     device = str(next(student.parameters()).device)
     ptq_init_model(student, hessians=None, percdamp=config["ptq"]["percdamp"])
