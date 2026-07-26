@@ -44,6 +44,12 @@ def _to_groups(w: Tensor, group_size: int) -> tuple[Tensor, int]:
     return w.reshape(*w.shape[:-1], n // g, g), g
 
 
+# cap on elements processed per optimal-quantizer slice: the sort's int64 index tensor is the
+# big transient (8B/elem — 4.3GB for one fused 5.4e8-elem expert tensor), and it spikes on every
+# parametrized access (PTQ init, eval builds, AND gradient-checkpoint recompute during training)
+_OPTIMAL_CHUNK_ELEMS = 1 << 27  # ~134M -> ~1GB index transient
+
+
 def quantize_ternary_optimal(w: Tensor, group_size: int = 128) -> tuple[Tensor, Tensor, Tensor]:
     """Exact per-group MSE-optimal ternary quantization (TWN closed form, no fixed ratio).
 
@@ -53,7 +59,18 @@ def quantize_ternary_optimal(w: Tensor, group_size: int = 128) -> tuple[Tensor, 
     found exactly by a sort + cumsum. Strictly no worse (in weight MSE) than absmean rounding
     or any fixed threshold ratio. Costs a per-group sort per call, which is noise next to the
     matmuls it feeds. Returns ``(w_hat, codes, scales)`` shaped like :func:`quantize_ternary`.
+
+    Large tensors are processed in leading-dim slices (the math is purely per-group, so the
+    split is exact) to bound the sort/cumsum transients — see ``_OPTIMAL_CHUNK_ELEMS``.
     """
+    if w.dim() > 1 and w.numel() > _OPTIMAL_CHUNK_ELEMS and w.shape[0] > 1:
+        rows = max(1, _OPTIMAL_CHUNK_ELEMS // max(1, w[0].numel()))
+        parts = [
+            quantize_ternary_optimal(w[i : i + rows], group_size)
+            for i in range(0, w.shape[0], rows)
+        ]
+        return tuple(torch.cat([p[j] for p in parts], dim=0) for j in range(3))  # type: ignore[return-value]
+
     wg, g = _to_groups(w, group_size)
     a = wg.abs().float()  # fp32: bf16 cumsum over 128 entries loses the argmax
     s, _ = torch.sort(a, dim=-1, descending=True)

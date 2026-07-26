@@ -91,6 +91,7 @@ def _eval_variant(
     for t in tasks:  # headline numerics per requested task (e.g. wikitext perplexities)
         r = res["results"].get(t) or {}
         out[t] = {k: v for k, v in r.items() if isinstance(v, (int, float))}
+    print(f"[{tag}] metrics: {out}")  # survives a later-variant crash (the JSON dump may not)
     if mmlu is not None and base.get("mmlu"):
         out["mmlu_retained"] = mmlu / base["mmlu"]
         print(f"[{tag}] MMLU {mmlu:.4f} vs FP16 {base['mmlu']:.4f} -> {out['mmlu_retained']:.1%} retained")

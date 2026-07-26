@@ -148,3 +148,15 @@ def test_optimal_ternary_all_zero_group_is_safe():
     w = torch.zeros(2, 128)
     w_hat, codes, scales = quantize_ternary(w, 128, "optimal")
     assert torch.isfinite(w_hat).all() and (codes == 0).all()
+
+
+def test_optimal_ternary_chunked_matches_unchunked(monkeypatch):
+    import bite.quant.fakequant as fq
+
+    torch.manual_seed(2)
+    w = torch.randn(6, 4, 256)  # 3D fused-expert layout
+    ref = fq.quantize_ternary_optimal(w, 128)
+    monkeypatch.setattr(fq, "_OPTIMAL_CHUNK_ELEMS", 1024)  # force ~1-row slices
+    chunked = fq.quantize_ternary_optimal(w, 128)
+    for r, c in zip(ref, chunked):
+        assert torch.equal(r, c)
