@@ -69,9 +69,22 @@ def _eval_variant(
     if hasattr(student, "config"):
         student.config.use_cache = False
 
-    res = run_lm_eval_model(
-        student, tokenizer, tasks, batch_size=cfg["eval"]["batch_size"], limit=limit
-    )
+    # perplexity tasks use ROLLING loglikelihood: window size defaults to the model's huge
+    # context and each window materializes full-vocab (248K) logits -> batch 8 OOM'd an H200
+    # next to the 70GB model. Run them separately at batch 1 with a 2048-token window.
+    ppl_tasks = [t for t in tasks if t in {"wikitext"}]
+    ll_tasks = [t for t in tasks if t not in ppl_tasks]
+    res: dict = {"results": {}}
+    if ll_tasks:
+        r = run_lm_eval_model(
+            student, tokenizer, ll_tasks, batch_size=cfg["eval"]["batch_size"], limit=limit
+        )
+        res["results"].update(r["results"])
+    if ppl_tasks:
+        r = run_lm_eval_model(
+            student, tokenizer, ppl_tasks, batch_size=1, max_length=2048, limit=limit
+        )
+        res["results"].update(r["results"])
     mmlu = res["results"].get("mmlu", {}).get("acc,none")
     base = (cfg.get("eval", {}) or {}).get("teacher_baseline") or {}
     out = {"variant": tag, "swapped": len(swapped), "mmlu": mmlu}

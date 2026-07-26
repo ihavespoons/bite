@@ -98,6 +98,7 @@ def run_lm_eval_model(
     batch_size: int = 8,
     apply_chat_template: bool = False,
     max_gen_toks: int | None = None,
+    max_length: int | None = None,
     **kw,
 ):  # pragma: no cover - runner
     """Same as :func:`run_lm_eval` but for an **already-loaded** model.
@@ -105,12 +106,18 @@ def run_lm_eval_model(
     Used to evaluate the in-memory QAD-healed student directly: its fake-quant structure
     (``QuantLinear`` swaps + expert parametrizations) is only reconstructable by rebuilding the
     student, so re-loading a saved checkpoint via ``from_pretrained`` would not round-trip it.
+
+    ``max_length`` caps the rolling-loglikelihood window for perplexity tasks — HFLM otherwise
+    derives it from the model config's huge context, and one window of full-vocab (248K) logits
+    next to the resident 70GB model OOMs even an H200.
     """
     from lm_eval import simple_evaluate
     from lm_eval.models.huggingface import HFLM
 
     _ensure_nltk()  # ifeval tokenizes with nltk punkt at eval time
-    hflm_kw = {"max_gen_toks": max_gen_toks} if max_gen_toks else {}
+    hflm_kw: dict = {"max_gen_toks": max_gen_toks} if max_gen_toks else {}
+    if max_length:
+        hflm_kw["max_length"] = max_length
     lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=batch_size, **hflm_kw)
     if apply_chat_template:
         kw["apply_chat_template"] = True
