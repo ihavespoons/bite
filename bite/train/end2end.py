@@ -387,7 +387,15 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     # terminate (and trigger periodic saves) on the ENUMERATED stream position, which is
     # identical on every rank — per-rank micro-step counters can drift by one at epoch tails
     # and would deadlock the collective save/gather
-    target_seqs = target_micro_steps * world
+    target_seqs = target_micro_steps * world * micro_batch
+    if save_every and save_every % (world * micro_batch) != 0:
+        # a save boundary inside a stride window means unequal completed-backward counts across
+        # ranks -> the pending grad-reduce collectives and the save's gather interleave -> hang
+        raise ValueError(
+            f"save_every must be a multiple of world*micro_batch={world * micro_batch} "
+            f"(got {save_every}); ideally of accum*world*micro_batch so saves land on "
+            "optimizer-step boundaries"
+        )
     history: list[dict] = []
     upload_threads: list = []
 
@@ -421,16 +429,25 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
         t.start()
         upload_threads.append(t)
 
+    import time
+
     step = 0
     seqs_seen = 0
+    buf: list[dict] = []
+    t_last = time.time()
     done = False
     while not done:
-        # rank-aware data-parallel sharding: each GPU trains on a disjoint slice of sequences
+        # rank-aware data-parallel sharding: contiguous micro_batch-sized chunks of the shared
+        # stream round-robin across ranks, so each rank's buffer fills exactly once per stride
         for ex in iter_shard_examples(shard_dir):
-            if seqs_seen % world == rank:
-                input_ids = ex["input_ids"].long().unsqueeze(0).to(device)
-                values = ex["values"].to(device).float().unsqueeze(0)
-                indices = ex["indices"].long().unsqueeze(0).to(device)
+            if (seqs_seen // micro_batch) % world == rank:
+                buf.append(ex)
+            seqs_seen += 1
+            if len(buf) == micro_batch:
+                input_ids = torch.stack([b["input_ids"].long() for b in buf]).to(device)
+                values = torch.stack([b["values"] for b in buf]).float().to(device)
+                indices = torch.stack([b["indices"].long() for b in buf]).to(device)
+                buf = []
                 logits = engine(input_ids=input_ids).logits
                 loss, parts = end2end_loss(
                     logits, values, indices, input_ids, w_kl=w_kl, w_ce=w_ce, temperature=temperature
@@ -440,12 +457,14 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
                 history.append({"step": step, "loss": float(loss.detach()), **parts})
                 if step % 10 == 0 or smoke:
                     alloc = torch.cuda.max_memory_allocated() / 1e9
+                    now = time.time()
+                    toks = 10 * micro_batch * world * input_ids.shape[1] / max(now - t_last, 1e-9)
+                    t_last = now
                     print(
                         f"step {step}: loss {float(loss.detach()):.4f} (kl {parts['kl']:.4f} "
-                        f"ce {parts['ce']:.4f}) peak {alloc:.0f}GB"
+                        f"ce {parts['ce']:.4f}) peak {alloc:.0f}GB ~{toks / 1e3:.1f}K tok/s"
                     )
                 step += 1
-            seqs_seen += 1
             if save_every and not smoke and seqs_seen % save_every == 0 and seqs_seen < target_seqs:
                 _periodic_save(seqs_seen)
             if seqs_seen >= target_seqs:
