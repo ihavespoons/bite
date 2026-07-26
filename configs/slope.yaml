@@ -1,0 +1,23 @@
+# Slope run: fresh, diverse tokens (the e2e go/no-go showed 1M tokens x14 epochs = memorization
+# without generalization). Weighted document mixture, ~20-50M teacher tokens, <=2 epochs, with
+# periodic held-out MMLU checkpoints -> retention-vs-tokens curve.
+defaults: base.yaml
+quant:
+  mode: ternary
+  # ternary_threshold: optimal   # enable once the absmean-vs-optimal A/B (eval_rules.json) confirms
+
+calibration:
+  seq_len: 2048
+  # knowledge-heavy mixture (MMLU is the degradation metric): FineWeb-Edu leads, c4 for register
+  # diversity, OpenWebMath for reasoning-adjacent text. Deterministic interleave (no RNG) keeps
+  # shards reproducible; skip_docs offsets later generation jobs onto fresh documents.
+  mixture:
+    - { dataset: HuggingFaceFW/fineweb-edu, subset: sample-10BT, weight: 0.6 }
+    - { dataset: allenai/c4, subset: en, weight: 0.25, skip_docs: 20000 }  # skip the ~1M tokens already used
+    - { dataset: open-web-math/open-web-math, weight: 0.15 }
+
+qad:
+  schedule: end_to_end
+  teacher_topk: 64
+  optimizer: adam8bit
+  lr: 1.0e-4

@@ -36,6 +36,8 @@ def precompute_teacher_logits(  # pragma: no cover - runner-side (teacher + data
     out_dir: str,
     *,
     k: int = 64,
+    start_index: int = 0,
+    log_every: int = 50,
 ) -> None:
     """Stream the QAD data through the frozen teacher; store (input_ids, top-k logits) shards.
 
@@ -49,6 +51,7 @@ def precompute_teacher_logits(  # pragma: no cover - runner-side (teacher + data
     import safetensors.torch as st
 
     os.makedirs(out_dir, exist_ok=True)
+    tokens = 0
     for i, batch in enumerate(batches):
         with torch.no_grad():
             logits = teacher(**batch).logits
@@ -59,5 +62,8 @@ def precompute_teacher_logits(  # pragma: no cover - runner-side (teacher + data
                 "values": values.to(torch.float16).cpu(),
                 "indices": indices.to(torch.int32).cpu(),
             },
-            f"{out_dir}/teacher_topk_{i:06d}.safetensors",
+            f"{out_dir}/teacher_topk_{start_index + i:06d}.safetensors",
         )
+        tokens += batch["input_ids"].numel()
+        if log_every and (i + 1) % log_every == 0:
+            print(f"teacher shards: {i + 1} written ({tokens / 1e6:.1f}M tokens)", flush=True)

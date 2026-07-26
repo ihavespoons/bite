@@ -24,6 +24,8 @@ def main() -> None:  # pragma: no cover - runner-side
     ap.add_argument("--skip-teacher-logits", action="store_true")
     ap.add_argument("--skip-save", action="store_true", help="don't write the 70GB student (validation)")
     ap.add_argument("--teacher-only", action="store_true", help="only precompute teacher logits (skip student/coverage/PTQ)")
+    ap.add_argument("--shards-name", default="teacher_topk", help="local subdir + repo path for the shards (use e.g. teacher_topk_slope for fresh slope-run data)")
+    ap.add_argument("--shard-start", type=int, default=0, help="shard filename start index (multi-job generation)")
     ap.add_argument("--push-repo", default=None, help="HF dataset repo to persist coverage + teacher logits")
     args = ap.parse_args()
     cfg = load_config(args.config)
@@ -91,10 +93,11 @@ def main() -> None:  # pragma: no cover - runner-side
         precompute_teacher_logits(
             teacher,
             stream_calibration(cfg, tokenizer, device=device, max_seqs=args.max_seqs),
-            f"{args.out}/teacher_topk",
+            f"{args.out}/{args.shards_name}",
             k=cfg["qad"]["teacher_topk"],
+            start_index=args.shard_start,
         )
-        print(f"saved teacher top-{cfg['qad']['teacher_topk']} logits -> {args.out}/teacher_topk")
+        print(f"saved teacher top-{cfg['qad']['teacher_topk']} logits -> {args.out}/{args.shards_name}")
 
     # 5. persist artifacts to HF so a detached job's output survives (coverage always; logits if made)
     if args.push_repo:
@@ -110,8 +113,8 @@ def main() -> None:  # pragma: no cover - runner-side
             )
         if not args.skip_teacher_logits:
             api.upload_folder(
-                folder_path=f"{args.out}/teacher_topk",
-                path_in_repo="teacher_topk",
+                folder_path=f"{args.out}/{args.shards_name}",
+                path_in_repo=args.shards_name,
                 repo_id=args.push_repo,
                 repo_type="dataset",
             )
