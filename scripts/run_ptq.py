@@ -133,6 +133,14 @@ def main() -> None:  # pragma: no cover - runner-side
             )
         print(f"uploaded artifacts -> {args.push_repo}")
 
+    # datasets streaming leaves non-daemon prefetch threads behind at interpreter shutdown
+    # (verified locally: the process hangs after main returns); a finished job would otherwise
+    # idle on GPU until the HF Jobs timeout. All uploads above are synchronous — safe to exit.
+    import sys
+
+    sys.stdout.flush()
+    os._exit(0)
+
 
 if __name__ == "__main__":
     main()
