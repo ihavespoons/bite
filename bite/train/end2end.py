@@ -180,6 +180,7 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     out_dir: str = "outputs/e2e",
     push_repo: str | None = None,
     skip_save: bool = False,
+    save_every: int = 0,
     smoke: bool = False,
 ) -> dict:
     """End-to-end ternary QAD under DeepSpeed ZeRO-3, all on-GPU (runner-side).
@@ -193,6 +194,13 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     4. Save a consolidated 16-bit checkpoint; MMLU runs in a separate 1-GPU reload-eval job
        (``eval_quant.py --load-weights``). ``smoke=True`` runs ``accum+1`` micro-steps so ONE
        real optimizer step happens, then asserts state/params actually moved — no eval/save.
+
+    ``save_every`` (in enumerated *sequences*, ~= tokens/2048; pick a multiple of
+    ``accum * world`` so saves land on optimizer-step boundaries) writes periodic consolidated
+    checkpoints for the retention-vs-tokens curve. The trigger counts the shared shard-stream
+    position — identical on every rank, so the collective ZeRO-3 gather can't deadlock — and
+    rank 0 uploads each checkpoint on a background thread (a blocking 70GB upload would idle
+    all GPUs), deleting the local copy afterwards.
     """
     import json
     import os
@@ -215,10 +223,12 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     tokenizer = load_tokenizer(mid)
     # CPU build: device_map to GPU installs accelerate hooks that block ZeRO-3 partitioning
     # (that was OOM #3); deepspeed.initialize owns placement and shards from here.
+    threshold_ratio = config["quant"].get("ternary_threshold")
     student, swapped, experts = build_student(
         mid,
         mode=config["quant"]["mode"],
         group_size=group_size,
+        threshold_ratio=threshold_ratio,
         device_map="cpu",
     )
     _host_mem("built")
@@ -236,7 +246,7 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
         # them, so a small-but-nonzero distance is the EXPECTED signature of the healed ckpt.
         if config["quant"]["mode"] == "ternary":
             probe = quant_parameters(student)[-1].detach().float()
-            err = (probe - quantize_ternary(probe, group_size)[0]).abs().max().item()
+            err = (probe - quantize_ternary(probe, group_size, threshold_ratio)[0]).abs().max().item()
             print(f"init checkpoint grid distance (telemetry): max {err:.3e}")
     _host_mem("loaded")
     if hasattr(student, "config"):
@@ -374,32 +384,71 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
     # smoke: accum+1 micro-steps guarantees crossing ONE real optimizer-step boundary — the
     # previous smoke (2 micro-steps, accum=8) never actually called optimizer.step()
     target_micro_steps = (accum + 1) if smoke else steps
+    # terminate (and trigger periodic saves) on the ENUMERATED stream position, which is
+    # identical on every rank — per-rank micro-step counters can drift by one at epoch tails
+    # and would deadlock the collective save/gather
+    target_seqs = target_micro_steps * world
     history: list[dict] = []
+    upload_threads: list = []
+
+    def _periodic_save(seqs: int) -> None:
+        tag = f"student16_seq{seqs:07d}"
+        engine.save_16bit_model(f"{out_dir}/{tag}", "model.safetensors")  # collective, all ranks
+        if rank != 0:
+            return
+        print(f"periodic checkpoint: {seqs} seqs (~{seqs * 2048 / 1e6:.0f}M tokens) -> {tag}")
+        if not push_repo:
+            return
+        import shutil
+        import threading
+
+        def _upload(path: str = f"{out_dir}/{tag}/model.safetensors", name: str = tag) -> None:
+            try:
+                from huggingface_hub import HfApi
+
+                HfApi().upload_file(
+                    path_or_fileobj=path,
+                    path_in_repo=f"e2e_student/{name}/model.safetensors",
+                    repo_id=push_repo,
+                    repo_type="dataset",
+                )
+                shutil.rmtree(os.path.dirname(path), ignore_errors=True)  # free ~70GB disk
+                print(f"uploaded checkpoint {name}")
+            except Exception as e:  # never kill a multi-hour run over an upload
+                print(f"WARN: upload of {name} failed: {e}")
+
+        t = threading.Thread(target=_upload, daemon=True)
+        t.start()
+        upload_threads.append(t)
+
     step = 0
+    seqs_seen = 0
     done = False
     while not done:
         # rank-aware data-parallel sharding: each GPU trains on a disjoint slice of sequences
-        for ex_idx, ex in enumerate(iter_shard_examples(shard_dir)):
-            if ex_idx % world != rank:
-                continue
-            input_ids = ex["input_ids"].long().unsqueeze(0).to(device)
-            values = ex["values"].to(device).float().unsqueeze(0)
-            indices = ex["indices"].long().unsqueeze(0).to(device)
-            logits = engine(input_ids=input_ids).logits
-            loss, parts = end2end_loss(
-                logits, values, indices, input_ids, w_kl=w_kl, w_ce=w_ce, temperature=temperature
-            )
-            engine.backward(loss)
-            engine.step()
-            history.append({"step": step, "loss": float(loss.detach()), **parts})
-            if step % 10 == 0 or smoke:
-                alloc = torch.cuda.max_memory_allocated() / 1e9
-                print(
-                    f"step {step}: loss {float(loss.detach()):.4f} (kl {parts['kl']:.4f} "
-                    f"ce {parts['ce']:.4f}) peak {alloc:.0f}GB"
+        for ex in iter_shard_examples(shard_dir):
+            if seqs_seen % world == rank:
+                input_ids = ex["input_ids"].long().unsqueeze(0).to(device)
+                values = ex["values"].to(device).float().unsqueeze(0)
+                indices = ex["indices"].long().unsqueeze(0).to(device)
+                logits = engine(input_ids=input_ids).logits
+                loss, parts = end2end_loss(
+                    logits, values, indices, input_ids, w_kl=w_kl, w_ce=w_ce, temperature=temperature
                 )
-            step += 1
-            if step >= target_micro_steps:
+                engine.backward(loss)
+                engine.step()
+                history.append({"step": step, "loss": float(loss.detach()), **parts})
+                if step % 10 == 0 or smoke:
+                    alloc = torch.cuda.max_memory_allocated() / 1e9
+                    print(
+                        f"step {step}: loss {float(loss.detach()):.4f} (kl {parts['kl']:.4f} "
+                        f"ce {parts['ce']:.4f}) peak {alloc:.0f}GB"
+                    )
+                step += 1
+            seqs_seen += 1
+            if save_every and not smoke and seqs_seen % save_every == 0 and seqs_seen < target_seqs:
+                _periodic_save(seqs_seen)
+            if seqs_seen >= target_seqs:
                 done = True
                 break
 
@@ -452,5 +501,7 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
                     repo_type="dataset",
                 )
             print(f"uploaded metrics + checkpoint -> {push_repo}")
+        for t in upload_threads:  # daemon threads die with the process — wait out in-flight uploads
+            t.join()
 
     return result

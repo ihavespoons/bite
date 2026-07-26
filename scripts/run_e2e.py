@@ -38,6 +38,7 @@ def main() -> None:
     ap.add_argument("--out", default="outputs/e2e")
     ap.add_argument("--push-repo", default=None)
     ap.add_argument("--skip-save", action="store_true")
+    ap.add_argument("--save-every", type=int, default=0, help="periodic consolidated checkpoints every N sequences (~N*2048 tokens; use a multiple of accum*world). 0 = final save only")
     ap.add_argument("--smoke", action="store_true", help="accum+1 micro-steps + optimizer-step assertions; no eval/save")
     # deepspeed launcher injects --local_rank
     ap.add_argument("--local_rank", type=int, default=0)
@@ -60,6 +61,7 @@ def main() -> None:
         out_dir=args.out,
         push_repo=args.push_repo,
         skip_save=args.skip_save,
+        save_every=args.save_every,
         smoke=args.smoke,
     )
 
