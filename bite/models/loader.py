@@ -84,6 +84,7 @@ def build_student(  # pragma: no cover - runner-side
     *,
     mode: str = "ternary",
     group_size: int = 128,
+    threshold_ratio: float | str | None = None,
     policy: PrecisionPolicy | None = None,
     device_map: str = "auto",
     clip_ste: bool = False,
@@ -100,9 +101,19 @@ def build_student(  # pragma: no cover - runner-side
     policy = policy or default_policy(mode)
     vision = find_vision_prefixes(model)
     swapped = swap_linears(
-        model, policy, group_size=group_size, clip_ste=clip_ste, exclude_prefixes=vision
+        model,
+        policy,
+        group_size=group_size,
+        threshold_ratio=threshold_ratio,
+        clip_ste=clip_ste,
+        exclude_prefixes=vision,
     )
     experts = install_expert_fakequant(
-        model, mode=mode, group_size=group_size, clip_ste=clip_ste, exclude_prefixes=vision
+        model,
+        mode=mode,
+        group_size=group_size,
+        threshold_ratio=threshold_ratio,
+        clip_ste=clip_ste,
+        exclude_prefixes=vision,
     )
     return model, swapped, experts

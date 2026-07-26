@@ -41,6 +41,7 @@ def gptq_quantize(
     *,
     mode: str = "ternary",
     group_size: int = 128,
+    threshold_ratio: float | str | None = None,
     percdamp: float = 0.01,
 ) -> tuple[Tensor, Tensor]:
     """GPTQ-style error-compensated PTQ of ``w`` to a ternary/binary grid.
@@ -48,9 +49,11 @@ def gptq_quantize(
     Args:
         w: weight ``[out_features, in_features]``.
         hessian: ``[in_features, in_features]`` calibration Hessian ``X Xᵀ``. ``None`` uses
-            the identity (equivalent to naive per-group rounding).
+            the identity (equivalent to plain per-group rounding).
         mode: ``"ternary"`` or ``"binary"``.
         group_size: scale group size along ``in_features``.
+        threshold_ratio: ternary scale rule (see :func:`quantize_ternary`); must match the
+            forward's rule so the init lands on-grid. Hessian path is absmean-only for now.
         percdamp: Hessian diagonal damping as a fraction of its mean diagonal.
 
     Returns ``(w_hat, scales)`` with ``scales`` group-shaped ``[out, n_groups]``.
@@ -65,8 +68,15 @@ def gptq_quantize(
         if mode == "binary":
             w_hat, _, _ = quantize_binary(w, group_size)
         else:
-            w_hat, _, _ = quantize_ternary(w, group_size)
+            w_hat, _, gs = quantize_ternary(w, group_size, threshold_ratio)
+            scales = gs.squeeze(-1).float()  # rule-consistent scales, [out, n_groups]
         return w_hat.to(dtype), scales.to(dtype)
+
+    if threshold_ratio is not None:
+        raise NotImplementedError(
+            "GPTQ Hessian path only supports absmean rounding; got "
+            f"threshold_ratio={threshold_ratio!r}"
+        )
 
     dev = w.device
     W = w.detach().float().clone()
@@ -119,6 +129,7 @@ def ptq_init_model(
             hessians.get(name),
             mode=module.mode,
             group_size=module.group_size,
+            threshold_ratio=module.threshold_ratio,
             percdamp=percdamp,
         )
         module.weight.data.copy_(w_hat)

@@ -86,3 +86,65 @@ def test_non_divisible_group_size_raises():
 def test_effective_bits_matches_whitepaper():
     assert abs(effective_bits("ternary", 128) - 1.71) < 0.01
     assert abs(effective_bits("binary", 128) - 1.125) < 0.01
+
+
+# --- exact MSE-optimal ternary ("optimal" rule) ---
+
+
+def _mse(w, w_hat):
+    return (w - w_hat).pow(2).mean().item()
+
+
+def test_optimal_ternary_codes_and_shapes():
+    w = torch.randn(4, 256)
+    w_hat, codes, scales = quantize_ternary(w, group_size=128, threshold_ratio="optimal")
+    assert w_hat.shape == codes.shape == w.shape
+    assert scales.shape == (4, 2, 1)
+    assert set(codes.unique().tolist()).issubset({-1.0, 0.0, 1.0})
+    assert (scales > 0).all()
+
+
+def test_optimal_ternary_matches_bruteforce_on_small_groups():
+    # exhaustively check the closed form against brute force over all support sizes
+    torch.manual_seed(3)
+    w = torch.randn(1, 8)
+    w_hat, _, _ = quantize_ternary(w, group_size=8, threshold_ratio="optimal")
+    a, _ = w.abs().sort(descending=True)
+    best = float("inf")
+    for k in range(1, 9):
+        scale = a[0, :k].mean()
+        cand = torch.sign(w) * (w.abs() >= a[0, k - 1]).float() * scale
+        best = min(best, _mse(w, cand))
+    assert abs(_mse(w, w_hat) - best) < 1e-7
+
+
+def test_optimal_ternary_beats_absmean_and_fixed_ratios():
+    torch.manual_seed(0)
+    for shape in [(8, 256), (4, 64, 128)]:  # 2D linear + 3D fused-expert layouts
+        w = torch.randn(*shape)
+        opt = _mse(w, quantize_ternary(w, 128, "optimal")[0])
+        assert opt <= _mse(w, quantize_ternary(w, 128, None)[0]) + 1e-8
+        for ratio in (0.5, 0.7, 0.9):
+            assert opt <= _mse(w, quantize_ternary(w, 128, ratio)[0]) + 1e-8
+
+
+def test_optimal_ternary_is_idempotent():
+    # PTQ init writes w_hat into the latent; the next forward must reproduce it exactly
+    torch.manual_seed(1)
+    w = torch.randn(4, 256)
+    w_hat, _, _ = quantize_ternary(w, 128, "optimal")
+    w_hat2, _, _ = quantize_ternary(w_hat, 128, "optimal")
+    assert torch.allclose(w_hat, w_hat2, atol=1e-6)
+
+
+def test_optimal_ternary_ste_gradient_flows():
+    w = torch.randn(4, 256, requires_grad=True)
+    out = fake_quantize(w, "ternary", 128, threshold_ratio="optimal")
+    out.sum().backward()
+    assert torch.allclose(w.grad, torch.ones_like(w))
+
+
+def test_optimal_ternary_all_zero_group_is_safe():
+    w = torch.zeros(2, 128)
+    w_hat, codes, scales = quantize_ternary(w, 128, "optimal")
+    assert torch.isfinite(w_hat).all() and (codes == 0).all()

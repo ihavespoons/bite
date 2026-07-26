@@ -44,21 +44,51 @@ def _to_groups(w: Tensor, group_size: int) -> tuple[Tensor, int]:
     return w.reshape(*w.shape[:-1], n // g, g), g
 
 
+def quantize_ternary_optimal(w: Tensor, group_size: int = 128) -> tuple[Tensor, Tensor, Tensor]:
+    """Exact per-group MSE-optimal ternary quantization (TWN closed form, no fixed ratio).
+
+    For a group with magnitudes sorted descending ``s_1 >= ... >= s_g``, keeping the top-k
+    entries with scale ``mean(top-k s)`` gives group MSE ``sum(w^2) - P_k^2 / k`` where
+    ``P_k = s_1 + ... + s_k`` — so the optimal support size is ``k* = argmax_k P_k^2 / k``,
+    found exactly by a sort + cumsum. Strictly no worse (in weight MSE) than absmean rounding
+    or any fixed threshold ratio. Costs a per-group sort per call, which is noise next to the
+    matmuls it feeds. Returns ``(w_hat, codes, scales)`` shaped like :func:`quantize_ternary`.
+    """
+    wg, g = _to_groups(w, group_size)
+    a = wg.abs().float()  # fp32: bf16 cumsum over 128 entries loses the argmax
+    s, _ = torch.sort(a, dim=-1, descending=True)
+    csum = s.cumsum(dim=-1)
+    k = torch.arange(1, g + 1, device=w.device, dtype=csum.dtype)
+    kstar = (csum.pow(2) / k).argmax(dim=-1, keepdim=True)
+    cut = s.gather(-1, kstar)  # magnitude of the k*-th largest entry
+    keep = a >= cut
+    # recompute the scale from the mask (ties at the cut may keep a few extra entries)
+    denom = keep.sum(dim=-1, keepdim=True).clamp_min(1)
+    scale = ((a * keep).sum(dim=-1, keepdim=True) / denom).clamp_min(EPS).to(w.dtype)
+    codes = torch.sign(wg) * keep.to(w.dtype)
+    w_hat = (codes * scale).reshape(w.shape)
+    return w_hat, codes.reshape(w.shape), scale
+
+
 def quantize_ternary(
-    w: Tensor, group_size: int = 128, threshold_ratio: float | None = None
+    w: Tensor, group_size: int = 128, threshold_ratio: float | str | None = None
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Quantize ``w`` to ternary ``{-1, 0, +1}`` with per-group scales.
 
-    Two scale rules:
+    Three scale rules:
 
     * ``threshold_ratio is None`` — BitNet-1.58 *absmean* rounding: ``scale = mean(|w|)``
       per group, ``code = clamp(round(w / scale), -1, 1)`` (zeroes ``|w| < 0.5*scale``).
-    * ``threshold_ratio`` set — TWN-style: keep ``|w| >= ratio * mean(|w|)``, scale is the
+    * ``threshold_ratio`` a float — TWN-style: keep ``|w| >= ratio * mean(|w|)``, scale is the
       mean magnitude of the kept entries (more MSE-optimal for peaky groups).
+    * ``threshold_ratio == "optimal"`` — exact per-group MSE-optimal support via
+      :func:`quantize_ternary_optimal`.
 
     Returns ``(w_hat, codes, scales)`` where ``w_hat`` and ``codes`` have ``w``'s shape and
     ``scales`` is group-shaped ``[..., n_groups, 1]``.
     """
+    if threshold_ratio == "optimal":
+        return quantize_ternary_optimal(w, group_size)
     wg, _ = _to_groups(w, group_size)
     abs_mean = wg.abs().mean(dim=-1, keepdim=True)
     if threshold_ratio is None:
@@ -106,7 +136,7 @@ def fake_quantize(
     w: Tensor,
     mode: Mode = "ternary",
     group_size: int = 128,
-    threshold_ratio: float | None = None,
+    threshold_ratio: float | str | None = None,
     clip_ste: bool = False,
 ) -> Tensor:
     """Return the STE-quantized view of ``w`` for use inside a forward pass.

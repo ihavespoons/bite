@@ -15,7 +15,10 @@ quant:
   # shipped and 1-bit is runnable (Stage 0 finding #6). Mainline-only runs would use g64.
   group_size: 128        # FP16 scale per group
   clip_ste: false
-  ternary_threshold: null  # null = BitNet absmean; float = TWN threshold ratio
+  # null = BitNet absmean rounding; float = fixed TWN threshold ratio; "optimal" = exact
+  # per-group MSE-optimal support (sort + cumsum closed form). On Gaussian weights optimal
+  # cuts weight MSE ~28% vs absmean; validating on the real model via eval_quant --rules.
+  ternary_threshold: null
 
 calibration:
   dataset: null          # HF dataset id (null -> allenai/c4 en, streamed)

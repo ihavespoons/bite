@@ -16,7 +16,17 @@ import argparse
 from bite.config import load_config
 
 
-def _eval_variant(model_id, cfg, tokenizer, *, keep_lmhead: bool, tasks, limit, load_weights=None):  # pragma: no cover - runner
+def _eval_variant(
+    model_id,
+    cfg,
+    tokenizer,
+    *,
+    keep_lmhead: bool,
+    tasks,
+    limit,
+    load_weights=None,
+    threshold_ratio=None,
+):  # pragma: no cover - runner
     import torch
 
     from bite.models.loader import build_student
@@ -29,7 +39,11 @@ def _eval_variant(model_id, cfg, tokenizer, *, keep_lmhead: bool, tasks, limit, 
     keep = _default_keep() + ((r"lm_head",) if keep_lmhead else ())
     policy = PrecisionPolicy(default=mode, keep_patterns=keep)
     student, swapped, experts = build_student(
-        model_id, mode=mode, group_size=cfg["quant"]["group_size"], policy=policy
+        model_id,
+        mode=mode,
+        group_size=cfg["quant"]["group_size"],
+        threshold_ratio=threshold_ratio,
+        policy=policy,
     )
     if load_weights:
         # eval a QAD-trained checkpoint: rebuild the fake-quant structure, then load the trained
@@ -46,7 +60,8 @@ def _eval_variant(model_id, cfg, tokenizer, *, keep_lmhead: bool, tasks, limit, 
         tag = f"e2e-trained (missing={len(missing)}, unexpected={len(unexpected)})"
         print(f"[{tag}] loaded {load_weights}")
     else:
-        tag = "lm_head=FP16" if keep_lmhead else "lm_head=ternary"
+        rule = "absmean" if threshold_ratio is None else str(threshold_ratio)
+        tag = ("lm_head=FP16" if keep_lmhead else "lm_head=ternary") + f", rule={rule}"
         print(f"[{tag}] quantized {len(swapped)} linears + {len(experts)} expert tensors")
         ptq_init_model(student, hessians=None, percdamp=cfg["ptq"]["percdamp"])
         ptq_init_experts(student)
@@ -60,6 +75,9 @@ def _eval_variant(model_id, cfg, tokenizer, *, keep_lmhead: bool, tasks, limit, 
     mmlu = res["results"].get("mmlu", {}).get("acc,none")
     base = (cfg.get("eval", {}) or {}).get("teacher_baseline") or {}
     out = {"variant": tag, "swapped": len(swapped), "mmlu": mmlu}
+    for t in tasks:  # headline numerics per requested task (e.g. wikitext perplexities)
+        r = res["results"].get(t) or {}
+        out[t] = {k: v for k, v in r.items() if isinstance(v, (int, float))}
     if mmlu is not None and base.get("mmlu"):
         out["mmlu_retained"] = mmlu / base["mmlu"]
         print(f"[{tag}] MMLU {mmlu:.4f} vs FP16 {base['mmlu']:.4f} -> {out['mmlu_retained']:.1%} retained")
@@ -73,12 +91,27 @@ def _eval_variant(model_id, cfg, tokenizer, *, keep_lmhead: bool, tasks, limit, 
     return out
 
 
+def _parse_rule(s):
+    """CLI/config -> quantize_ternary threshold_ratio: None (absmean), 'optimal', or a float."""
+    if s in (None, "", "absmean", "none", "null"):
+        return None
+    if isinstance(s, (int, float)):
+        return float(s)
+    return "optimal" if s == "optimal" else float(s)
+
+
 def main() -> None:  # pragma: no cover - runner
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="configs/ternary.yaml")
     ap.add_argument("--model", default=None)
     ap.add_argument("--eval-tasks", default="mmlu")
     ap.add_argument("--variant", default="both", choices=("both", "ternary", "fp16"), help="which lm_head variant(s) to eval")
+    ap.add_argument(
+        "--rules",
+        default=None,
+        help="comma-separated ternary scale rules to compare (absmean|optimal|<float ratio>); "
+        "default: the config's quant.ternary_threshold",
+    )
     ap.add_argument("--load-weights", default=None, help="eval a QAD-trained consolidated checkpoint (safetensors) instead of PTQ-init; local path or repo-relative (downloaded from --load-repo)")
     ap.add_argument("--load-repo", default="ihavespoons/bite-baseline", help="HF dataset to download --load-weights from when not a local path")
     ap.add_argument("--eval-limit", type=int, default=100, help="examples per MMLU subtask (fast directional read)")
@@ -108,11 +141,24 @@ def main() -> None:  # pragma: no cover - runner
             _eval_variant(model_id, cfg, tokenizer, keep_lmhead=False, tasks=tasks, limit=args.eval_limit, load_weights=weights)
         )
     else:
+        if args.rules:
+            rules = [_parse_rule(r) for r in args.rules.split(",")]
+        else:
+            rules = [_parse_rule((cfg.get("quant") or {}).get("ternary_threshold"))]
         variants = {"both": (False, True), "ternary": (False,), "fp16": (True,)}[args.variant]
-        for keep_lmhead in variants:
-            results.append(
-                _eval_variant(model_id, cfg, tokenizer, keep_lmhead=keep_lmhead, tasks=tasks, limit=args.eval_limit)
-            )
+        for rule in rules:
+            for keep_lmhead in variants:
+                results.append(
+                    _eval_variant(
+                        model_id,
+                        cfg,
+                        tokenizer,
+                        keep_lmhead=keep_lmhead,
+                        tasks=tasks,
+                        limit=args.eval_limit,
+                        threshold_ratio=rule,
+                    )
+                )
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:

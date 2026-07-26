@@ -33,7 +33,7 @@ class FakeQuantParam(nn.Module):
         self,
         mode: str = "ternary",
         group_size: int = 128,
-        threshold_ratio: float | None = None,
+        threshold_ratio: float | str | None = None,
         clip_ste: bool = False,
     ) -> None:
         super().__init__()
@@ -51,6 +51,7 @@ def install_expert_fakequant(
     *,
     mode: str = "ternary",
     group_size: int = 128,
+    threshold_ratio: float | str | None = None,
     clip_ste: bool = False,
     exclude_prefixes: tuple[str, ...] = (),
 ) -> dict[str, str]:
@@ -68,7 +69,9 @@ def install_expert_fakequant(
             p = getattr(module, pname, None)
             if isinstance(p, nn.Parameter) and p.dim() == 3:
                 parametrize.register_parametrization(
-                    module, pname, FakeQuantParam(mode, group_size, clip_ste=clip_ste)
+                    module,
+                    pname,
+                    FakeQuantParam(mode, group_size, threshold_ratio, clip_ste=clip_ste),
                 )
                 installed[f"{name}.{pname}"] = mode
     return installed
