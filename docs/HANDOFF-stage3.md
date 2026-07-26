@@ -115,3 +115,26 @@ Requirements found on the way (all committed): model.train() (eval silently disa
 enable_input_require_grads, use_reentrant=True (non-reentrant breaks under ZeRO-3),
 device_map="cpu" load (GPU device_map blocks sharding), --mem-probe for per-layer prints.
 Branch stage3-qad @ 732c595. Reverie: bite-stage3-e2e-paused-resume-point.
+
+---
+
+## ADDENDUM 2 (2026-07-26): e2e verdict + next phase
+
+**Stage 3 e2e complete.** Training heals on-distribution (CE 7.81->1.26 over 500 micro-steps,
+8xA100, peak 70GB/rank with the gathered-param release fix) but held-out MMLU = 0.2395 (chance):
+1M tokens x14 epochs = memorization without generalization. Token diversity, not optimization,
+is the binding constraint. Full write-up: docs/report-extreme-quant-moe.md (complete, no
+placeholders). Repo PUBLIC (Apache-2.0) + dataset public with card (e2e_student checkpoint is a
+TORCH PICKLE named .safetensors — DeepSpeed save_16bit_model quirk; eval_quant handles it).
+
+**NEXT PHASE (agreed order):**
+0. RunPod migration FIRST (user-funded account; ~half HF's $/GPU-hr): scripts/launch_runpod.py
+   mirroring launch_hf.py stages; repo is public now so no GITHUB_TOKEN needed to clone;
+   artifacts still push to the HF dataset. Keep launch_hf.py as fallback.
+1. Better PTQ init (~$30): layer-sequential GPTQ (hessian.py scaffold), AWQ-style scaling,
+   ternary threshold search. Biggest single lever — start closer, heal less.
+2. Throughput pass (~$10): micro_batch=2, compiled causal-conv1d, checkpoint granularity
+   (currently only ~1.7K tok/s on 8xA100 → expect 2-3x).
+3. Slope run (~$50-150 at RunPod prices): 20-50M fresh tokens, FineWeb-Edu-heavy mixture,
+   expert-balanced sampling + hard-example mining, periodic MMLU checkpoints.
+Fallbacks: expert-level mixed precision, scale-only warmup, progressive precision.
