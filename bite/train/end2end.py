@@ -355,9 +355,13 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
 
     # probe: a slice of one expert latent, cloned pre-training — the smoke asserts the optimizer
     # step actually moved it (a silent bnb no-op on DS flat partitions would otherwise pass)
-    probe_param = trainable[-1]
-    with deepspeed.zero.GatheredParameters([probe_param]):
-        probe_before = probe_param.flatten()[:4096].detach().clone().cpu()
+    # three probes across the trainable list: an attention QuantLinear gets dense grads every
+    # token, while an expert latent slice can legitimately see zero grad if that expert wasn't
+    # routed during a short smoke — one probe alone can't distinguish "optimizer broken" from
+    # "sparse routing" (or from an all-zero-grad regression in the data path)
+    probe_params = [trainable[0], trainable[len(trainable) // 2], trainable[-1]]
+    with deepspeed.zero.GatheredParameters(probe_params):
+        probes_before = [p.flatten()[:4096].detach().clone().cpu() for p in probe_params]
 
     if mem_probe and rank == 0:
         # per-decoder-layer memory probes (toy showed the quant machinery is leak-free; this
@@ -489,13 +493,26 @@ def run_end2end_qad(  # pragma: no cover - requires model + GPU + deepspeed
             v.dtype for st_ in opt.state.values() for v in st_.values() if torch.is_tensor(v)
         }
         assert torch.uint8 in state_dtypes, f"bnb 8-bit state missing (dtypes: {state_dtypes})"
-        # 3. the probed latent slice actually moved
-        with deepspeed.zero.GatheredParameters([probe_param]):
-            probe_after = probe_param.flatten()[:4096].detach().cpu()
-        moved = (probe_after - probe_before).abs().max().item()
-        assert moved > 0, "optimizer step did not change the probed latent"
+        # 3. the optimizer actually cycled (DS increments global_steps on real optimizer steps)
+        gsteps = getattr(engine, "global_steps", None)
+        gnorm = engine.get_global_grad_norm() if hasattr(engine, "get_global_grad_norm") else None
+        print(f"smoke: global_steps={gsteps} global_grad_norm={gnorm}")
+        # 4. at least one probed slice moved; report each so a sparse-routing miss on an expert
+        #    latent is distinguishable from a dead optimizer (dense-grad attention probe)
+        moved_max = 0.0
+        with deepspeed.zero.GatheredParameters(probe_params):
+            for i, (p, before) in enumerate(zip(probe_params, probes_before)):
+                after = p.flatten()[:4096].detach().cpu()
+                delta = (after - before).abs()
+                n_moved = int((delta > 0).sum())
+                print(
+                    f"smoke probe[{i}] shape={tuple(p.shape)}: moved {n_moved}/4096 "
+                    f"(max delta {delta.max().item():.3e})"
+                )
+                moved_max = max(moved_max, delta.max().item())
+        assert moved_max > 0, "optimizer step did not change ANY probed slice"
         peak = torch.cuda.max_memory_allocated() / 1e9
-        print(f"SMOKE OK: optimizer step verified (probe moved {moved:.2e}, "
+        print(f"SMOKE OK: optimizer step verified (max probe delta {moved_max:.2e}, "
               f"8-bit state on CUDA, peak {peak:.0f}GB/rank)")
         return result
 
