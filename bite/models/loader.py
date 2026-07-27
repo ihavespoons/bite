@@ -88,6 +88,8 @@ def build_student(  # pragma: no cover - runner-side
     policy: PrecisionPolicy | None = None,
     device_map: str = "auto",
     clip_ste: bool = False,
+    expert_keep_patterns: tuple[str, ...] = (),
+    keep_expert_indices: tuple[int, ...] | None = None,
 ):
     """Load the model, quantize the language weights: ``QuantLinear`` for the ``nn.Linear``
     attention/lm-head, and fused-expert fake-quant for the MoE experts (3D Parameters).
@@ -115,5 +117,7 @@ def build_student(  # pragma: no cover - runner-side
         threshold_ratio=threshold_ratio,
         clip_ste=clip_ste,
         exclude_prefixes=vision,
+        keep_patterns=expert_keep_patterns,
+        keep_expert_indices=keep_expert_indices,
     )
     return model, swapped, experts

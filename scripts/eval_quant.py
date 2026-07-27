@@ -26,17 +26,22 @@ def _eval_variant(
     limit,
     load_weights=None,
     threshold_ratio=None,
+    keep_patterns=(),
+    expert_keep_patterns=(),
+    keep_expert_frac: float = 0.0,
+    keep_expert_by: str = "error",
+    label=None,
 ):  # pragma: no cover - runner
     import torch
 
     from bite.models.loader import build_student
     from bite.quant.policy import PrecisionPolicy, _default_keep
-    from bite.quant.experts import ptq_init_experts
+    from bite.quant.experts import apply_expert_mixed_precision, ptq_init_experts
     from bite.quant.ptq import ptq_init_model
     from bite.eval.harness import run_lm_eval_model
 
     mode = cfg["quant"]["mode"]
-    keep = _default_keep() + ((r"lm_head",) if keep_lmhead else ())
+    keep = _default_keep() + ((r"lm_head",) if keep_lmhead else ()) + tuple(keep_patterns)
     policy = PrecisionPolicy(default=mode, keep_patterns=keep)
     student, swapped, experts = build_student(
         model_id,
@@ -44,6 +49,14 @@ def _eval_variant(
         group_size=cfg["quant"]["group_size"],
         threshold_ratio=threshold_ratio,
         policy=policy,
+        expert_keep_patterns=tuple(expert_keep_patterns),
+    )
+    # expert-level mixed precision is applied AFTER the build: selecting the worst-represented
+    # experts needs the weights themselves
+    mixed = (
+        apply_expert_mixed_precision(student, keep_expert_frac, keep_expert_by)
+        if keep_expert_frac
+        else {}
     )
     if load_weights:
         # eval a QAD-trained checkpoint: rebuild the fake-quant structure, then load the trained
@@ -64,7 +77,7 @@ def _eval_variant(
         print(f"[{tag}] loaded {load_weights}")
     else:
         rule = "absmean" if threshold_ratio is None else str(threshold_ratio)
-        tag = ("lm_head=FP16" if keep_lmhead else "lm_head=ternary") + f", rule={rule}"
+        tag = label or (("lm_head=FP16" if keep_lmhead else "lm_head=ternary") + f", rule={rule}")
         print(f"[{tag}] quantized {len(swapped)} linears + {len(experts)} expert tensors")
         ptq_init_model(student, hessians=None, percdamp=cfg["ptq"]["percdamp"])
         ptq_init_experts(student)
@@ -90,7 +103,15 @@ def _eval_variant(
         res["results"].update(r["results"])
     mmlu = res["results"].get("mmlu", {}).get("acc,none")
     base = (cfg.get("eval", {}) or {}).get("teacher_baseline") or {}
-    out = {"variant": tag, "swapped": len(swapped), "mmlu": mmlu}
+    out = {
+        "variant": tag,
+        "swapped": len(swapped),
+        "experts_quantized": sum(1 for v in experts.values() if v != "keep"),
+        "expert_tensors_kept": sum(1 for v in experts.values() if v == "keep"),
+        "kept_expert_slots_per_tensor": (max(mixed.values()) if mixed else 0),
+        "keep_expert_frac": keep_expert_frac,
+        "mmlu": mmlu,
+    }
     for t in tasks:  # headline numerics per requested task (e.g. wikitext perplexities)
         r = res["results"].get(t) or {}
         out[t] = {k: v for k, v in r.items() if isinstance(v, (int, float))}
@@ -132,6 +153,11 @@ def main() -> None:  # pragma: no cover - runner
     ap.add_argument("--load-weights", default=None, help="eval a QAD-trained consolidated checkpoint (safetensors) instead of PTQ-init; local path or repo-relative (downloaded from --load-repo)")
     ap.add_argument("--load-repo", default="ihavespoons/bite-baseline", help="HF dataset to download --load-weights from when not a local path")
     ap.add_argument("--eval-limit", type=int, default=100, help="examples per MMLU subtask (fast directional read)")
+    ap.add_argument("--keep-patterns", default="", help="comma-separated regexes: nn.Linear modules to hold at high precision (sensitivity ablations)")
+    ap.add_argument("--expert-keep-patterns", default="", help="comma-separated regexes: FUSED expert tensors to hold at high precision (the policy only covers Linears)")
+    ap.add_argument("--keep-expert-frac", type=float, default=0.0, help="expert-level mixed precision: fraction of expert SLOTS kept high-precision in every quantized tensor")
+    ap.add_argument("--keep-expert-by", default="error", choices=("error", "first"), help="which slots to keep: highest ternary quantization error, or the first N (control)")
+    ap.add_argument("--label", default=None, help="label recorded in the results JSON")
     ap.add_argument("--out", default="outputs/diag/eval_quant.json")
     ap.add_argument("--push-repo", default=None)
     args = ap.parse_args()
@@ -145,6 +171,9 @@ def main() -> None:  # pragma: no cover - runner
     model_id = args.model or cfg["model"]["id"]
     tasks = args.eval_tasks.split(",")
     tokenizer = load_tokenizer(model_id)
+
+    keep_patterns = tuple(p for p in args.keep_patterns.split(",") if p)
+    expert_keep_patterns = tuple(p for p in args.expert_keep_patterns.split(",") if p)
 
     results = []
     if args.load_weights:
@@ -174,6 +203,11 @@ def main() -> None:  # pragma: no cover - runner
                         tasks=tasks,
                         limit=args.eval_limit,
                         threshold_ratio=rule,
+                        keep_patterns=keep_patterns,
+                        expert_keep_patterns=expert_keep_patterns,
+                        keep_expert_frac=args.keep_expert_frac,
+                        keep_expert_by=args.keep_expert_by,
+                        label=args.label,
                     )
                 )
 

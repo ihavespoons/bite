@@ -37,6 +37,11 @@ STAGES = {
         "model,eval",
         "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python scripts/eval_quant.py --config {config} {extra}",
     ),
+    # forward-only sensitivity sweep: many PTQ variants, one subprocess each (model cached once)
+    "sweep": (
+        "model,eval",
+        "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python scripts/sensitivity_sweep.py --config {config} {extra}",
+    ),
     # toy ZeRO-3+parametrize leak repro (a10g-small, pennies); model extra for the real
     # transformers Qwen MoE block (--real-moe)
     "repro": (
