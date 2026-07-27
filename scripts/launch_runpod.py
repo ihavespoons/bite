@@ -166,7 +166,8 @@ def watch(pod_id: str, log_name: str, api_key: str, hf_token: str, repo: str,
                 print(f"  [{int(waited)}s] container up {int(since_start)}s, awaiting first heartbeat", flush=True)
         else:
             parts = status.split()
-            ts, state = int(parts[0]), (parts[1] if len(parts) > 1 else "running")
+            # status is "<ts> <state>" where state may be "exit <code>" — keep the whole tail
+            ts, state = int(parts[0]), (" ".join(parts[1:]) if len(parts) > 1 else "running")
             age = int(now - ts)
             log = _hf_get(repo, f"logs/{log_name}.log", hf_token) or ""
             if len(log) > shown:  # print only what's new since last poll
@@ -211,6 +212,11 @@ def build_entrypoint(args, log_name_expr: str) -> str:
         # BEFORE the redirect below (a failed exec redirect kills the shell instantly)
         "mkdir -p /workspace; cd /workspace; "
         "exec > >(tee -a /workspace/job.log) 2>&1; "
+        # RunPod RESTARTS the container when it exits, racing our termination (seen live: a
+        # finished job began a second run). Without this guard the real job would restart —
+        # re-downloading 140GB and re-training — until the delete lands. The container disk
+        # persists across the restart, so the stop file reliably means "already did the work".
+        'if [ -f /workspace/hb.stop ]; then echo "restart after completion; exiting"; kill_pod; exit 0; fi; '
         "apt-get -qq update && apt-get -qq install -y git curl >/dev/null 2>&1; "
         # 3. huggingface_hub FIRST and the heartbeat started BEFORE the heavy install, so a hang
         #    or failure during setup is visible instead of looking like a dead pod
