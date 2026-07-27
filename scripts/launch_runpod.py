@@ -257,7 +257,11 @@ def main() -> None:
     ap.add_argument("--watch", metavar="POD_ID", help="attach to an already-running pod")
     ap.add_argument("--watch-name", default=None, help="log basename for --watch (default bite-<stage>-<pod_id>)")
     ap.add_argument("--image", default=IMAGE, help=f"docker image (default {IMAGE}). RunPod-published images (runpod/pytorch:*) may be pre-cached on machines; third-party Docker Hub pulls have measured 25-45min at full GPU rate")
-    ap.add_argument("--gpu-type", default="NVIDIA A100-SXM4-80GB")
+    # gpuTypeIds is a LIST of acceptable types — RunPod picks one with capacity. Passing a
+    # single type means a 500 "no instances currently available" whenever that one is short,
+    # and list-gpu-types' maxCount is the per-pod maximum, NOT live stock.
+    ap.add_argument("--gpu-type", default="NVIDIA A100-SXM4-80GB",
+                    help="comma-separated acceptable gpuTypeIds, tried as a set")
     ap.add_argument("--gpu-count", type=int, default=1)
     ap.add_argument("--cloud", default="SECURE", choices=("SECURE", "COMMUNITY"))
     ap.add_argument("--disk", type=int, default=400, help="container disk GB (model 70 + init 70 + ckpts)")
@@ -305,7 +309,7 @@ def main() -> None:
         "imageName": args.image,
         "cloudType": args.cloud,
         "computeType": "GPU",
-        "gpuTypeIds": [args.gpu_type],
+        "gpuTypeIds": [g.strip() for g in args.gpu_type.split(",") if g.strip()],
         "gpuCount": args.gpu_count,
         "containerDiskInGb": args.disk,
         "volumeInGb": 0,
@@ -321,7 +325,7 @@ def main() -> None:
     pod = _rest("POST", "/pods", api_key, body)
     pid = pod.get("id") if isinstance(pod, dict) else None
     log_name = f"{pod_name}-{pid}"
-    print(f"pod created: {pid}  (${args.gpu_count} x {args.gpu_type})")
+    print(f"pod created: {pid}  ({args.gpu_count} x {args.gpu_type})")
     print(f"live log:    https://huggingface.co/datasets/{args.log_repo}/blob/main/logs/{log_name}.log")
     print(f"attach:      python scripts/launch_runpod.py --watch {pid} --watch-name {log_name}")
     print(f"terminate:   python scripts/launch_runpod.py --terminate {pid}")
