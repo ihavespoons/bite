@@ -158,7 +158,17 @@ def load_init_checkpoint(student, repo: str, out_dir: str, subdir: str = "qad_st
     )
     sd: dict = {}
     for shard in sorted(glob.glob(f"{out_dir}/{subdir}/*.safetensors")):
-        sd.update(st.load_file(shard))  # zero-copy mmap on CPU
+        try:
+            sd.update(st.load_file(shard))  # zero-copy mmap on CPU
+        except Exception:
+            # DeepSpeed's save_16bit_model writes a TORCH PICKLE regardless of the .safetensors
+            # filename, so our own periodic checkpoints can't be mmap'd. mmap=True still avoids
+            # materialising 70GB per rank; without this, resuming from a prior run's checkpoint
+            # (--init-subdir e2e_student/student16_seqNNNNNNN) fails outright.
+            import torch as _torch
+
+            sd.update(_torch.load(shard, map_location="cpu", weights_only=True, mmap=True))
+            print(f"loaded {shard} as torch pickle (DeepSpeed save_16bit_model format)")
     missing, unexpected = student.load_state_dict(sd, strict=False, assign=True)
     real_missing = [k for k in missing if "inv_freq" not in k]  # non-persistent buffers are fine
     assert not unexpected and not real_missing, (real_missing[:5], list(unexpected)[:5])
