@@ -268,6 +268,9 @@ def main() -> None:
     ap.add_argument("--max-seconds", type=int, default=36_000, help="hard timeout around the stage command")
     ap.add_argument("--config", default="configs/ternary.yaml")
     ap.add_argument("--ref", default="main")
+    ap.add_argument("--env", action="append", default=[], metavar="KEY=VAL",
+                    help="extra container env var, repeatable (e.g. NCCL_DEBUG=WARN, or "
+                         "NCCL_P2P_DISABLE=1 on hosts without working peer-to-peer)")
     ap.add_argument("--extra-pip", default="")
     ap.add_argument("--extra-args", default="")
     ap.add_argument("--log-repo", default="ihavespoons/bite-baseline", help="HF dataset the job ships logs to")
@@ -313,7 +316,11 @@ def main() -> None:
         "gpuCount": args.gpu_count,
         "containerDiskInGb": args.disk,
         "volumeInGb": 0,
-        "env": {"HF_TOKEN": hf_token, "RUNPOD_API_KEY": api_key},
+        "env": {
+            "HF_TOKEN": hf_token,
+            "RUNPOD_API_KEY": api_key,
+            **dict(kv.split("=", 1) for kv in args.env),
+        },
         # $RUNPOD_POD_ID is injected by RunPod, so the log name is derivable on both sides
         "dockerEntrypoint": ["bash", "-c", build_entrypoint(args, f"{pod_name}-$RUNPOD_POD_ID")],
     }
