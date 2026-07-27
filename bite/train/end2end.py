@@ -25,6 +25,7 @@ The loss and shard-iteration are pure/CPU-testable; the ZeRO-3 driver is runner-
 from __future__ import annotations
 
 import glob
+import os
 from collections.abc import Iterator
 
 import torch
@@ -162,12 +163,17 @@ def load_init_checkpoint(student, repo: str, out_dir: str, subdir: str = "qad_st
             sd.update(st.load_file(shard))  # zero-copy mmap on CPU
         except Exception:
             # DeepSpeed's save_16bit_model writes a TORCH PICKLE regardless of the .safetensors
-            # filename, so our own periodic checkpoints can't be mmap'd. mmap=True still avoids
-            # materialising 70GB per rank; without this, resuming from a prior run's checkpoint
-            # (--init-subdir e2e_student/student16_seqNNNNNNN) fails outright.
+            # filename, so our own periodic checkpoints can't be mmap'd as safetensors. Modern
+            # torch.load dispatches on the .safetensors EXTENSION and would bounce straight back
+            # here, so hardlink to a .bin name first — that keeps mmap=True, and with it the
+            # shared page cache (70GB total, not 70GB x ranks). Without this, resuming from a
+            # prior run's checkpoint (--init-subdir e2e_student/student16_seqNNNNNNN) is impossible.
             import torch as _torch
 
-            sd.update(_torch.load(shard, map_location="cpu", weights_only=True, mmap=True))
+            alt = f"{shard.rsplit('.safetensors', 1)[0]}.ckpt.bin"
+            if not os.path.exists(alt):
+                os.link(shard, alt)
+            sd.update(_torch.load(alt, map_location="cpu", weights_only=True, mmap=True))
             print(f"loaded {shard} as torch pickle (DeepSpeed save_16bit_model format)")
     missing, unexpected = student.load_state_dict(sd, strict=False, assign=True)
     real_missing = [k for k in missing if "inv_freq" not in k]  # non-persistent buffers are fine

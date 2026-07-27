@@ -54,7 +54,10 @@ def _eval_variant(
 
             sd = st.load_file(load_weights)
         except Exception:
-            sd = torch.load(load_weights, map_location="cpu", weights_only=True)
+            # modern torch.load dispatches on the .safetensors EXTENSION and would bounce back
+            # into safetensors, so read through a file object to bypass that
+            with open(load_weights, "rb") as fh:
+                sd = torch.load(fh, map_location="cpu", weights_only=True)
             print("loaded as torch pickle (DeepSpeed save_16bit_model format)")
         missing, unexpected = student.load_state_dict(sd, strict=False)
         tag = f"e2e-trained (missing={len(missing)}, unexpected={len(unexpected)})"
