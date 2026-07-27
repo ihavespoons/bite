@@ -37,7 +37,16 @@ import time
 import urllib.error
 import urllib.request
 
-from launch_hf import IMAGE, REPO, STAGES  # same stages, same docker image
+from launch_hf import REPO, STAGES  # same stages as HF Jobs; the image differs (see below)
+
+# RunPod serves its OWN published images from a machine-local cache; third-party Docker Hub
+# images are pulled anonymously and throttled. Measured time-to-container-start:
+#   pytorch/pytorch:2.6.0-cuda12.4 (7.4GB, Docker Hub) -> 25 min on A4000, 45+ min on 8xA100
+#   runpod/pytorch:...torch260     (10.7GB, cached)    -> ~3 min
+# The larger image starts 10x faster, and pull time bills at the full GPU rate ($9 wasted on
+# one 8xA100 launch). This tag keeps torch 2.6 — the version the DeepSpeed/fla stack was
+# validated against — and only moves CUDA 12.4 -> 12.8.
+IMAGE = "runpod/pytorch:1.1.0-cu1281-torch260-ubuntu2404"
 
 REST = "https://rest.runpod.io/v1"
 HF_RESOLVE = "https://huggingface.co/datasets/{repo}/resolve/main/{path}"
@@ -115,7 +124,19 @@ def fetch_logs(pod_id: str, api_key: str, since: str | None, read_seconds: int =
 
 
 def terminate(pod_id: str, api_key: str, why: str = "") -> None:
-    _rest("DELETE", f"/pods/{pod_id}", api_key)
+    """Delete the pod. A 404 means the container's own trap already did it — that's success."""
+    req = urllib.request.Request(
+        f"{REST}/pods/{pod_id}",
+        method="DELETE",
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    try:
+        urllib.request.urlopen(req, timeout=60)
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        print(f"pod {pod_id} already gone (self-terminated)", flush=True)
+        return
     print(f"terminated {pod_id}{f' ({why})' if why else ''}", flush=True)
 
 
@@ -235,6 +256,7 @@ def main() -> None:
     ap.add_argument("--terminate", metavar="POD_ID")
     ap.add_argument("--watch", metavar="POD_ID", help="attach to an already-running pod")
     ap.add_argument("--watch-name", default=None, help="log basename for --watch (default bite-<stage>-<pod_id>)")
+    ap.add_argument("--image", default=IMAGE, help=f"docker image (default {IMAGE}). RunPod-published images (runpod/pytorch:*) may be pre-cached on machines; third-party Docker Hub pulls have measured 25-45min at full GPU rate")
     ap.add_argument("--gpu-type", default="NVIDIA A100-SXM4-80GB")
     ap.add_argument("--gpu-count", type=int, default=1)
     ap.add_argument("--cloud", default="SECURE", choices=("SECURE", "COMMUNITY"))
@@ -280,7 +302,7 @@ def main() -> None:
     pod_name = args.name or f"bite-{args.stage}"
     body = {
         "name": pod_name,
-        "imageName": IMAGE,
+        "imageName": args.image,
         "cloudType": args.cloud,
         "computeType": "GPU",
         "gpuTypeIds": [args.gpu_type],
