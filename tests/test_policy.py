@@ -29,9 +29,16 @@ def test_explicit_binary_override():
     assert p.resolve("model.layers.0.self_attn.o_proj") == "ternary"
 
 
+def test_intn_default_is_accepted():
+    """intN became a first-class target (bitwidth curve); it must resolve like any other mode."""
+    assert PrecisionPolicy(default="int4").resolve("model.layers.0.self_attn.q_proj") == "int4"
+    assert PrecisionPolicy(default="int2").resolve("x.gate") == "keep"  # keeps still win
+
+
 def test_invalid_default_raises():
-    try:
-        PrecisionPolicy(default="int4")
-    except ValueError:
-        return
-    raise AssertionError("expected ValueError for invalid default")
+    for bad in ("int1", "int9", "fp8", "nonsense", ""):
+        try:
+            PrecisionPolicy(default=bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected ValueError for default={bad!r}")

@@ -121,6 +121,36 @@ def quantize_ternary(
     return w_hat, codes.reshape(w.shape), scale
 
 
+def parse_mode(mode: Mode) -> tuple[str, int]:
+    """``"ternary"|"binary"|"intN"`` -> ``(kind, bits)``. ``intN`` is uniform symmetric N-bit."""
+    if mode in ("ternary", "binary"):
+        return mode, 0
+    if isinstance(mode, str) and mode.startswith("int") and mode[3:].isdigit():
+        bits = int(mode[3:])
+        if not 2 <= bits <= 8:
+            raise ValueError(f"intN supports 2..8 bits, got {bits}")
+        return "int", bits
+    raise ValueError(f"unknown mode {mode!r}; expected 'ternary', 'binary', or 'intN' (2-8)")
+
+
+def quantize_uniform(w: Tensor, bits: int, group_size: int = 128) -> tuple[Tensor, Tensor, Tensor]:
+    """Uniform **symmetric** N-bit quantization with one absmax scale per group.
+
+    Codes span ``[-(2^(b-1)-1), 2^(b-1)-1]`` (symmetric, zero representable) and the scale is
+    ``absmax / qmax`` — the Q*_0 convention of the llama.cpp fork we target, so a measured
+    bitwidth curve maps onto shippable formats rather than an idealized grid.
+
+    Exists to answer a question the ternary work never asked: WHERE is this model's quality
+    cliff? We know FP16 (0.8393 MMLU) and ternary-1.71bpw (chance) and nothing in between.
+    """
+    qmax = 2 ** (bits - 1) - 1
+    wg, _ = _to_groups(w, group_size)
+    scale = (wg.abs().amax(dim=-1, keepdim=True) / qmax).clamp_min(EPS)
+    codes = torch.clamp(torch.round(wg / scale), -qmax, qmax)
+    w_hat = (codes * scale).reshape(w.shape)
+    return w_hat, codes.reshape(w.shape), scale
+
+
 def quantize_binary(w: Tensor, group_size: int = 128) -> tuple[Tensor, Tensor, Tensor]:
     """Quantize ``w`` to binary ``{-1, +1}`` with per-group scales.
 
@@ -162,12 +192,13 @@ def fake_quantize(
     (plain STE) unless ``clip_ste`` is set, in which case gradients are zeroed where the
     latent weight lies outside the representable range ``|w| > scale`` (LLM-QAT clipping).
     """
-    if mode == "ternary":
+    kind, bits = parse_mode(mode)
+    if kind == "ternary":
         w_hat, _, scale = quantize_ternary(w, group_size, threshold_ratio)
-    elif mode == "binary":
+    elif kind == "binary":
         w_hat, _, scale = quantize_binary(w, group_size)
     else:
-        raise ValueError(f"unknown mode {mode!r}; expected 'ternary' or 'binary'")
+        w_hat, _, scale = quantize_uniform(w, bits, group_size)
 
     if not clip_ste:
         # detach trick: forward = w_hat, backward = identity to w
@@ -180,5 +211,10 @@ def fake_quantize(
 
 def effective_bits(mode: Mode, group_size: int = 128, scale_bits: int = 16) -> float:
     """Idealized bits/weight for a representation, matching the whitepaper's accounting."""
-    code_bits = {"ternary": torch.log2(torch.tensor(3.0)).item(), "binary": 1.0}[mode]
+    kind, bits = parse_mode(mode)
+    code_bits = {
+        "ternary": torch.log2(torch.tensor(3.0)).item(),
+        "binary": 1.0,
+        "int": float(bits),
+    }[kind]
     return code_bits + scale_bits / group_size

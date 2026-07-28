@@ -19,7 +19,13 @@ import torch
 from torch import Tensor, nn
 from torch.nn.utils import parametrize
 
-from bite.quant.fakequant import fake_quantize, quantize_binary, quantize_ternary
+from bite.quant.fakequant import (
+    fake_quantize,
+    parse_mode,
+    quantize_binary,
+    quantize_ternary,
+    quantize_uniform,
+)
 from bite.quant.policy import KEEP
 from bite.quant.quantlinear import _is_excluded
 
@@ -120,8 +126,11 @@ def install_expert_fakequant(
 
 
 def _quantize_like(w: Tensor, fq: FakeQuantParam) -> Tensor:
-    if fq.mode == "binary":
+    kind, bits = parse_mode(fq.mode)
+    if kind == "binary":
         return quantize_binary(w, fq.group_size)[0]
+    if kind == "int":
+        return quantize_uniform(w, bits, fq.group_size)[0]
     return quantize_ternary(w, fq.group_size, fq.threshold_ratio)[0]
 
 

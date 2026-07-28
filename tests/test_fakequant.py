@@ -160,3 +160,59 @@ def test_optimal_ternary_chunked_matches_unchunked(monkeypatch):
     chunked = fq.quantize_ternary_optimal(w, 128)
     for r, c in zip(ref, chunked):
         assert torch.equal(r, c)
+
+
+# --- uniform N-bit (the missing bitwidth curve: where is this model's cliff?) ---
+
+from bite.quant.fakequant import parse_mode, quantize_uniform
+
+
+def test_parse_mode():
+    assert parse_mode("ternary") == ("ternary", 0)
+    assert parse_mode("binary") == ("binary", 0)
+    assert parse_mode("int4") == ("int", 4)
+    for bad in ("int1", "int9", "fp8", "int", "nonsense"):
+        try:
+            parse_mode(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected ValueError for {bad!r}")
+
+
+def test_uniform_code_alphabet_and_symmetry():
+    torch.manual_seed(0)
+    w = torch.randn(4, 256)
+    for bits, qmax in ((2, 1), (3, 3), (4, 7), (8, 127)):
+        w_hat, codes, scales = quantize_uniform(w, bits, 128)
+        assert codes.abs().max() <= qmax, bits
+        assert codes.eq(codes.round()).all()
+        assert (scales > 0).all()
+        assert w_hat.shape == w.shape
+
+
+def test_uniform_error_falls_monotonically_with_bits():
+    torch.manual_seed(0)
+    w = torch.randn(8, 512)
+    errs = [(w - quantize_uniform(w, b, 128)[0]).pow(2).mean().item() for b in (2, 3, 4, 6, 8)]
+    assert all(a > b for a, b in zip(errs, errs[1:])), errs
+    # 2-bit uniform (3 levels used symmetrically) should be in the ballpark of ternary
+    tern = (w - quantize_ternary(w, 128)[0]).pow(2).mean().item()
+    assert 0.2 < errs[0] / tern < 5.0
+
+
+def test_uniform_absmax_scale_means_no_clipping():
+    w = torch.randn(2, 128)
+    w_hat, _, _ = quantize_uniform(w, 4, 128)
+    assert w_hat.abs().max() <= w.abs().max() * 1.001  # absmax scaling never exceeds the input
+
+
+def test_effective_bits_for_intn():
+    assert abs(effective_bits("int4", 128) - (4 + 16 / 128)) < 1e-9
+    assert abs(effective_bits("int2", 128) - (2 + 16 / 128)) < 1e-9
+    assert effective_bits("ternary", 128) < effective_bits("int2", 128)
+
+
+def test_fake_quantize_intn_ste_gradient():
+    w = torch.randn(4, 128, requires_grad=True)
+    fake_quantize(w, "int4", 128).sum().backward()
+    assert torch.allclose(w.grad, torch.ones_like(w.grad))

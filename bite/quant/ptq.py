@@ -16,7 +16,14 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
-from bite.quant.fakequant import EPS, _to_groups, quantize_binary, quantize_ternary
+from bite.quant.fakequant import (
+    EPS,
+    _to_groups,
+    parse_mode,
+    quantize_binary,
+    quantize_ternary,
+    quantize_uniform,
+)
 
 
 def group_absmean_scales(w: Tensor, group_size: int) -> Tensor:
@@ -27,11 +34,13 @@ def group_absmean_scales(w: Tensor, group_size: int) -> Tensor:
 
 def _round_to_grid(col: Tensor, scale: Tensor, mode: str) -> Tensor:
     """Round one weight column to its group's grid (``scale`` is per-row for this column)."""
-    if mode == "binary":
+    kind, bits = parse_mode(mode)
+    if kind == "binary":
         q = torch.sign(col)
         q = torch.where(q == 0, torch.ones_like(q), q)
         return q * scale
-    level = torch.clamp(torch.round(col / scale), -1.0, 1.0)
+    qmax = 1.0 if kind == "ternary" else float(2 ** (bits - 1) - 1)
+    level = torch.clamp(torch.round(col / scale), -qmax, qmax)
     return level * scale
 
 
@@ -59,14 +68,24 @@ def gptq_quantize(
     Returns ``(w_hat, scales)`` with ``scales`` group-shaped ``[out, n_groups]``.
     """
     dtype = w.dtype
-    scales = group_absmean_scales(w.detach().float(), group_size)  # [out, n_groups]
+    if parse_mode(mode)[0] == "int":
+        _, bits_ = parse_mode(mode)
+        wg, _ = _to_groups(w.detach().float(), group_size)
+        scales = (wg.abs().amax(dim=-1) / (2 ** (bits_ - 1) - 1)).clamp_min(EPS)
+    else:
+        scales = group_absmean_scales(w.detach().float(), group_size)  # [out, n_groups]
 
     # No Hessian -> identity preconditioner -> error feedback does nothing, so the GPTQ column
     # loop is exactly plain per-group rounding. Take the fast vectorized path (critical: the
     # loop over a 35B model's thousands of expert Linears would otherwise take hours).
+    kind, bits = parse_mode(mode)
     if hessian is None:
-        if mode == "binary":
+        if kind == "binary":
             w_hat, _, _ = quantize_binary(w, group_size)
+        elif kind == "int":
+            # uniform N-bit uses an ABSMAX scale, not absmean — keep scales rule-consistent
+            w_hat, _, gs = quantize_uniform(w, bits, group_size)
+            scales = gs.squeeze(-1).float()
         else:
             w_hat, _, gs = quantize_ternary(w, group_size, threshold_ratio)
             scales = gs.squeeze(-1).float()  # rule-consistent scales, [out, n_groups]

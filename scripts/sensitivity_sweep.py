@@ -27,6 +27,17 @@ import sys
 
 # Qwen3.6-35B-A3B naming: attention projections are q/k/v/o_proj; the fused MoE experts are
 # 3D params named gate_up_proj / down_proj; the router is `...mlp.gate` (already kept).
+# The bitwidth curve: we know FP16 (0.8393) and ternary-1.71bpw (chance) and NOTHING between,
+# so we cannot say whether the cliff sits just under 4 bits or just under 2 — which decides
+# whether a better representation could close the gap at all. intN needs no scale-rule search,
+# so PTQ init is fast (the ternary sweep's cost was dominated by the optimal rule's sort).
+BITWIDTH_VARIANTS: list[dict] = [
+    {"name": "int8", "why": "sanity ceiling: 8-bit should be ~lossless", "mode": "int8"},
+    {"name": "int4", "why": "the standard deployable point", "mode": "int4"},
+    {"name": "int3", "why": "where most PTQ methods start to hurt", "mode": "int3"},
+    {"name": "int2", "why": "nearest uniform neighbour of ternary (2.125 vs 1.71 bpw)", "mode": "int2"},
+]
+
 VARIANTS: list[dict] = [
     # --- control: the current all-ternary policy (expected ~0.2695 with the optimal rule) ---
     {"name": "baseline_ternary", "why": "control"},
@@ -75,6 +86,8 @@ def run_variant(v: dict, args, out_path: str) -> dict:
         cmd += ["--keep-patterns", v["keep_patterns"]]
     if v.get("expert_keep_patterns"):
         cmd += ["--expert-keep-patterns", v["expert_keep_patterns"]]
+    if v.get("mode"):
+        cmd += ["--mode", v["mode"]]
     if v.get("keep_expert_frac"):
         cmd += ["--keep-expert-frac", str(v["keep_expert_frac"]),
                 "--keep-expert-by", v.get("keep_expert_by", "error")]
@@ -96,13 +109,17 @@ def main() -> None:  # pragma: no cover - runner
     ap.add_argument("--model", default=None)
     ap.add_argument("--eval-tasks", default="mmlu")
     ap.add_argument("--eval-limit", type=int, default=100)
+    ap.add_argument("--set", default="sensitivity", choices=("sensitivity", "bitwidth", "all"), help="which variant family to run")
     ap.add_argument("--only", default="", help="comma-separated variant names to run (default: all)")
     ap.add_argument("--out", default="outputs/diag/sensitivity_sweep.json")
     ap.add_argument("--push-repo", default=None)
     args = ap.parse_args()
 
+    pool = BITWIDTH_VARIANTS + VARIANTS if args.set == "all" else (
+        BITWIDTH_VARIANTS if args.set == "bitwidth" else VARIANTS
+    )
     only = {s for s in args.only.split(",") if s}
-    todo = [v for v in VARIANTS if not only or v["name"] in only]
+    todo = [v for v in pool if not only or v["name"] in only]
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     print(f"sweep: {len(todo)} variants -> {args.out}", flush=True)
 

@@ -28,6 +28,7 @@ def _eval_variant(
     threshold_ratio=None,
     keep_patterns=(),
     expert_keep_patterns=(),
+    mode_override: str | None = None,
     keep_expert_frac: float = 0.0,
     keep_expert_by: str = "error",
     label=None,
@@ -39,8 +40,9 @@ def _eval_variant(
     from bite.quant.experts import apply_expert_mixed_precision, ptq_init_experts
     from bite.quant.ptq import ptq_init_model
     from bite.eval.harness import run_lm_eval_model
+    from bite.quant.fakequant import effective_bits as _effective_bits
 
-    mode = cfg["quant"]["mode"]
+    mode = mode_override or cfg["quant"]["mode"]
     keep = _default_keep() + ((r"lm_head",) if keep_lmhead else ()) + tuple(keep_patterns)
     policy = PrecisionPolicy(default=mode, keep_patterns=keep)
     student, swapped, experts = build_student(
@@ -77,6 +79,7 @@ def _eval_variant(
         print(f"[{tag}] loaded {load_weights}")
     else:
         rule = "absmean" if threshold_ratio is None else str(threshold_ratio)
+        rule = rule if mode.startswith(("ternary", "binary")) else "n/a"  # intN has no scale rule
         tag = label or (("lm_head=FP16" if keep_lmhead else "lm_head=ternary") + f", rule={rule}")
         print(f"[{tag}] quantized {len(swapped)} linears + {len(experts)} expert tensors")
         ptq_init_model(student, hessians=None, percdamp=cfg["ptq"]["percdamp"])
@@ -110,6 +113,8 @@ def _eval_variant(
         "expert_tensors_kept": sum(1 for v in experts.values() if v == "keep"),
         "kept_expert_slots_per_tensor": (max(mixed.values()) if mixed else 0),
         "keep_expert_frac": keep_expert_frac,
+        "mode": mode,
+        "bpw": _effective_bits(mode, cfg["quant"]["group_size"]),
         "mmlu": mmlu,
     }
     for t in tasks:  # headline numerics per requested task (e.g. wikitext perplexities)
@@ -157,6 +162,7 @@ def main() -> None:  # pragma: no cover - runner
     ap.add_argument("--expert-keep-patterns", default="", help="comma-separated regexes: FUSED expert tensors to hold at high precision (the policy only covers Linears)")
     ap.add_argument("--keep-expert-frac", type=float, default=0.0, help="expert-level mixed precision: fraction of expert SLOTS kept high-precision in every quantized tensor")
     ap.add_argument("--keep-expert-by", default="error", choices=("error", "first"), help="which slots to keep: highest ternary quantization error, or the first N (control)")
+    ap.add_argument("--mode", default=None, help="quantization mode override: ternary | binary | intN (2-8). Default: config quant.mode")
     ap.add_argument("--label", default=None, help="label recorded in the results JSON")
     ap.add_argument("--out", default="outputs/diag/eval_quant.json")
     ap.add_argument("--push-repo", default=None)
@@ -205,6 +211,7 @@ def main() -> None:  # pragma: no cover - runner
                         threshold_ratio=rule,
                         keep_patterns=keep_patterns,
                         expert_keep_patterns=expert_keep_patterns,
+                        mode_override=args.mode,
                         keep_expert_frac=args.keep_expert_frac,
                         keep_expert_by=args.keep_expert_by,
                         label=args.label,

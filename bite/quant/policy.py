@@ -36,8 +36,9 @@ class PrecisionPolicy:
     ternary_patterns: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.default not in ("ternary", "binary"):
-            raise ValueError(f"default must be 'ternary' or 'binary', got {self.default!r}")
+        from bite.quant.fakequant import parse_mode
+
+        parse_mode(self.default)  # raises for anything but ternary/binary/intN
         self._keep = [re.compile(p) for p in self.keep_patterns]
         self._binary = [re.compile(p) for p in self.binary_patterns]
         self._ternary = [re.compile(p) for p in self.ternary_patterns]
