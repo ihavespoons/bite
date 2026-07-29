@@ -224,8 +224,11 @@ def build_entrypoint(args, log_name_expr: str) -> str:
         '-H "Authorization: Bearer $RUNPOD_API_KEY" >/dev/null 2>&1 || true; }; '
         # 1. trap = the ONLY termination path, so success, failure, and timeout all converge
         #    here. It flushes a final log synchronously before deleting the pod.
+        # The final flush is TIME-BOUNDED and kill_pod runs even if it fails: an HF 429
+        # rate-limit made this flush retry for hours once, and because termination waited on
+        # it the pod billed ~$9 after its work was done. Shutdown must never block on network.
         'finish() { code=$?; echo "exit $code" > /workspace/hb.stop; '
-        f'[ -f /workspace/bite/scripts/pod_heartbeat.py ] && {hb} --interval 0 >/dev/null 2>&1; '  # final flush
+        f'[ -f /workspace/bite/scripts/pod_heartbeat.py ] && timeout 120 {hb} --interval 0 >/dev/null 2>&1; '
         'kill_pod; }; '
         "trap finish EXIT; "
         # 2. capture everything from here on into the log the heartbeat ships
