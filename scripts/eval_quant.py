@@ -29,6 +29,9 @@ def _eval_variant(
     keep_patterns=(),
     expert_keep_patterns=(),
     mode_override: str | None = None,
+    offline: bool = False,
+    rotate: bool = False,
+    expert_axis: int = 1,
     keep_expert_frac: float = 0.0,
     keep_expert_by: str = "error",
     label=None,
@@ -43,24 +46,43 @@ def _eval_variant(
     from bite.quant.fakequant import effective_bits as _effective_bits
 
     mode = mode_override or cfg["quant"]["mode"]
-    keep = _default_keep() + ((r"lm_head",) if keep_lmhead else ()) + tuple(keep_patterns)
-    policy = PrecisionPolicy(default=mode, keep_patterns=keep)
-    student, swapped, experts = build_student(
-        model_id,
-        mode=mode,
-        group_size=cfg["quant"]["group_size"],
-        threshold_ratio=threshold_ratio,
-        policy=policy,
-        expert_keep_patterns=tuple(expert_keep_patterns),
-    )
-    # expert-level mixed precision is applied AFTER the build: selecting the worst-represented
-    # experts needs the weights themselves
-    mixed = (
-        apply_expert_mixed_precision(student, keep_expert_frac, keep_expert_by)
-        if keep_expert_frac
-        else {}
-    )
-    if load_weights:
+    if offline:
+        # forward-only measurement path: no parametrizations/STE. Lets us (a) group the fused
+        # expert tensors along their CONTRACTION axis (the fake-quant path groups the last dim,
+        # which for (E, hidden, 2*inter) is the output axis — scales shared across weights that
+        # never meet in a dot product) and (b) simulate Hadamard rotation exactly.
+        from bite.models.loader import load_teacher
+        from bite.quant.offline import quantize_model_offline
+        from bite.quant.policy import _default_keep as _dk
+
+        student = load_teacher(model_id)
+        stats = quantize_model_offline(
+            student, mode=mode, group_size=cfg["quant"]["group_size"],
+            threshold_ratio=threshold_ratio, rotate=rotate, expert_axis=expert_axis,
+            keep_patterns=_dk() + tuple(keep_patterns) + tuple(expert_keep_patterns),
+        )
+        tag = label or f"offline {mode} rotate={rotate} expert_axis={expert_axis}"
+        swapped, experts, mixed = {}, {}, {}
+        print(f"[{tag}] {stats}", flush=True)
+    else:
+        keep = _default_keep() + ((r"lm_head",) if keep_lmhead else ()) + tuple(keep_patterns)
+        policy = PrecisionPolicy(default=mode, keep_patterns=keep)
+        student, swapped, experts = build_student(
+            model_id,
+            mode=mode,
+            group_size=cfg["quant"]["group_size"],
+            threshold_ratio=threshold_ratio,
+            policy=policy,
+            expert_keep_patterns=tuple(expert_keep_patterns),
+        )
+        # expert-level mixed precision is applied AFTER the build: selecting the worst-represented
+        # experts needs the weights themselves
+        mixed = (
+            apply_expert_mixed_precision(student, keep_expert_frac, keep_expert_by)
+            if keep_expert_frac
+            else {}
+        )
+    if not offline and load_weights:
         # eval a QAD-trained checkpoint: rebuild the fake-quant structure, then load the trained
         # latents (the parametrizations re-apply fake-quant on forward). NOTE: DeepSpeed's
         # save_16bit_model writes a torch pickle regardless of the filename's extension.
@@ -77,7 +99,7 @@ def _eval_variant(
         missing, unexpected = student.load_state_dict(sd, strict=False)
         tag = f"e2e-trained (missing={len(missing)}, unexpected={len(unexpected)})"
         print(f"[{tag}] loaded {load_weights}")
-    else:
+    elif not offline:
         rule = "absmean" if threshold_ratio is None else str(threshold_ratio)
         rule = rule if mode.startswith(("ternary", "binary")) else "n/a"  # intN has no scale rule
         tag = label or (("lm_head=FP16" if keep_lmhead else "lm_head=ternary") + f", rule={rule}")
@@ -162,6 +184,9 @@ def main() -> None:  # pragma: no cover - runner
     ap.add_argument("--expert-keep-patterns", default="", help="comma-separated regexes: FUSED expert tensors to hold at high precision (the policy only covers Linears)")
     ap.add_argument("--keep-expert-frac", type=float, default=0.0, help="expert-level mixed precision: fraction of expert SLOTS kept high-precision in every quantized tensor")
     ap.add_argument("--keep-expert-by", default="error", choices=("error", "first"), help="which slots to keep: highest ternary quantization error, or the first N (control)")
+    ap.add_argument("--offline", action="store_true", help="one-shot offline quantization instead of fake-quant parametrizations (enables --rotate and correct expert grouping axis)")
+    ap.add_argument("--rotate", action="store_true", help="quantize in a Hadamard-rotated basis (incoherence processing); offline only")
+    ap.add_argument("--expert-axis", type=int, default=1, help="axis of the fused expert tensors to group along; 1 = contraction (correct), -1 = last (the fake-quant default)")
     ap.add_argument("--mode", default=None, help="quantization mode override: ternary | binary | intN (2-8). Default: config quant.mode")
     ap.add_argument("--label", default=None, help="label recorded in the results JSON")
     ap.add_argument("--out", default="outputs/diag/eval_quant.json")
@@ -212,6 +237,9 @@ def main() -> None:  # pragma: no cover - runner
                         keep_patterns=keep_patterns,
                         expert_keep_patterns=expert_keep_patterns,
                         mode_override=args.mode,
+                        offline=args.offline,
+                        rotate=args.rotate,
+                        expert_axis=args.expert_axis,
                         keep_expert_frac=args.keep_expert_frac,
                         keep_expert_by=args.keep_expert_by,
                         label=args.label,

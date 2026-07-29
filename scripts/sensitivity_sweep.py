@@ -31,11 +31,47 @@ import sys
 # so we cannot say whether the cliff sits just under 4 bits or just under 2 — which decides
 # whether a better representation could close the gap at all. intN needs no scale-rule search,
 # so PTQ init is fast (the ternary sweep's cost was dominated by the optimal rule's sort).
-BITWIDTH_VARIANTS: list[dict] = [
+BITWIDTH_# Representation experiments (offline path). Two independent levers on the SAME bit budget:
+#  * expert grouping axis — the fake-quant path groups the fused experts' LAST dim, which is the
+#    OUTPUT axis, so one scale is shared across weights that never meet in a dot product. axis=1
+#    is the contraction axis (what llama.cpp Q*_0 and everyone else uses). Pure bug-fix, free.
+#  * Hadamard rotation — measured locally on synthetic weights: helps ternary on heavy-tailed
+#    sources (0.53-0.65x MSE) but is ~1.9x WORSE for int2 on sparse-spiky ones, so it is tested,
+#    not assumed. Weight MSE is only a proxy: the optimal rule cut MSE 28% and moved MMLU +1.6pt.
+REPRESENTATION_VARIANTS: list[dict] = [
+    {"name": "offline_ternary_lastaxis", "why": "offline control: reproduces the fake-quant policy",
+     "offline": True, "expert_axis": -1},
+    {"name": "offline_ternary_contraxis", "why": "expert grouping axis FIX alone",
+     "offline": True, "expert_axis": 1},
+    {"name": "offline_ternary_rot", "why": "axis fix + Hadamard rotation",
+     "offline": True, "expert_axis": 1, "rotate": True},
+    {"name": "offline_int2_rot", "why": "axis fix + rotation at int2 (2.125bpw)",
+     "offline": True, "expert_axis": 1, "rotate": True, "mode": "int2"},
+]
+
+VARIANTS: list[dict] = [
     {"name": "int8", "why": "sanity ceiling: 8-bit should be ~lossless", "mode": "int8"},
     {"name": "int4", "why": "the standard deployable point", "mode": "int4"},
     {"name": "int3", "why": "where most PTQ methods start to hurt", "mode": "int3"},
     {"name": "int2", "why": "nearest uniform neighbour of ternary (2.125 vs 1.71 bpw)", "mode": "int2"},
+]
+
+# Representation experiments (offline path). Two independent levers on the SAME bit budget:
+#  * expert grouping axis — the fake-quant path groups the fused experts' LAST dim, which is the
+#    OUTPUT axis, so one scale is shared across weights that never meet in a dot product. axis=1
+#    is the contraction axis (what llama.cpp Q*_0 and everyone else uses). Pure bug-fix, free.
+#  * Hadamard rotation — measured locally on synthetic weights: helps ternary on heavy-tailed
+#    sources (0.53-0.65x MSE) but is ~1.9x WORSE for int2 on sparse-spiky ones, so it is tested,
+#    not assumed. Weight MSE is only a proxy: the optimal rule cut MSE 28% and moved MMLU +1.6pt.
+REPRESENTATION_VARIANTS: list[dict] = [
+    {"name": "offline_ternary_lastaxis", "why": "offline control: reproduces the fake-quant policy",
+     "offline": True, "expert_axis": -1},
+    {"name": "offline_ternary_contraxis", "why": "expert grouping axis FIX alone",
+     "offline": True, "expert_axis": 1},
+    {"name": "offline_ternary_rot", "why": "axis fix + Hadamard rotation",
+     "offline": True, "expert_axis": 1, "rotate": True},
+    {"name": "offline_int2_rot", "why": "axis fix + rotation at int2 (2.125bpw)",
+     "offline": True, "expert_axis": 1, "rotate": True, "mode": "int2"},
 ]
 
 VARIANTS: list[dict] = [
@@ -88,6 +124,10 @@ def run_variant(v: dict, args, out_path: str) -> dict:
         cmd += ["--expert-keep-patterns", v["expert_keep_patterns"]]
     if v.get("mode"):
         cmd += ["--mode", v["mode"]]
+    if v.get("offline"):
+        cmd += ["--offline", "--expert-axis", str(v.get("expert_axis", 1))]
+    if v.get("rotate"):
+        cmd += ["--rotate"]
     if v.get("keep_expert_frac"):
         cmd += ["--keep-expert-frac", str(v["keep_expert_frac"]),
                 "--keep-expert-by", v.get("keep_expert_by", "error")]
@@ -109,15 +149,19 @@ def main() -> None:  # pragma: no cover - runner
     ap.add_argument("--model", default=None)
     ap.add_argument("--eval-tasks", default="mmlu")
     ap.add_argument("--eval-limit", type=int, default=100)
-    ap.add_argument("--set", default="sensitivity", choices=("sensitivity", "bitwidth", "all"), help="which variant family to run")
+    ap.add_argument("--set", default="sensitivity", choices=("sensitivity", "bitwidth", "representation", "all"), help="which variant family to run")
     ap.add_argument("--only", default="", help="comma-separated variant names to run (default: all)")
     ap.add_argument("--out", default="outputs/diag/sensitivity_sweep.json")
     ap.add_argument("--push-repo", default=None)
     args = ap.parse_args()
 
-    pool = BITWIDTH_VARIANTS + VARIANTS if args.set == "all" else (
-        BITWIDTH_VARIANTS if args.set == "bitwidth" else VARIANTS
-    )
+    pools = {
+        "sensitivity": VARIANTS,
+        "bitwidth": BITWIDTH_VARIANTS,
+        "representation": REPRESENTATION_VARIANTS,
+        "all": BITWIDTH_VARIANTS + REPRESENTATION_VARIANTS + VARIANTS,
+    }
+    pool = pools[args.set]
     only = {s for s in args.only.split(",") if s}
     todo = [v for v in pool if not only or v["name"] in only]
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
