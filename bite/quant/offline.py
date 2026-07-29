@@ -100,7 +100,7 @@ def quantize_tensor_offline(
 EXPERT_CONTRACT_AXIS = 1
 
 
-def quantize_model_offline(  # pragma: no cover - runner-side (needs a real model)
+def quantize_model_offline(
     model: nn.Module,
     *,
     mode: str = "ternary",
@@ -109,23 +109,41 @@ def quantize_model_offline(  # pragma: no cover - runner-side (needs a real mode
     rotate: bool = False,
     expert_axis: int = EXPERT_CONTRACT_AXIS,
     keep_patterns: tuple[str, ...] = (),
+    exclude_prefixes: tuple[str, ...] | None = None,
     expert_param_names: tuple[str, ...] = ("gate_up_proj", "down_proj", "gate_proj", "up_proj"),
     verbose: bool = True,
 ) -> dict:
-    """Quantize every eligible weight IN PLACE. Returns counts and how much got rotated."""
+    """Quantize every eligible weight IN PLACE. Returns counts and how much got rotated.
+
+    ``exclude_prefixes`` defaults to the model's vision tower (as ``build_student`` does). Tensors
+    whose grouping axis is not divisible by ``group_size`` are SKIPPED and counted rather than
+    raising — a real model has odd shapes (a 4304-wide projection killed the first sweep), and
+    one awkward tensor must not lose a whole run.
+    """
+    from bite.models.loader import find_vision_prefixes
+    from bite.quant.quantlinear import _is_excluded
+
+    if exclude_prefixes is None:
+        exclude_prefixes = find_vision_prefixes(model)
     keeps = [re.compile(p) for p in keep_patterns]
     kept = lambda name: any(r.search(name) for r in keeps)  # noqa: E731
 
     stats = {
         "linears": 0, "linear_params": 0, "linears_rotated": 0,
         "experts": 0, "expert_params": 0, "experts_rotated": 0,
-        "skipped": 0,
+        "skipped": 0, "skipped_indivisible": 0, "skipped_vision": 0,
     }
     with torch.no_grad():
         for name, module in model.named_modules():
+            if _is_excluded(name, tuple(exclude_prefixes)):
+                stats["skipped_vision"] += 1
+                continue
             if isinstance(module, nn.Linear):
                 if kept(name):
                     stats["skipped"] += 1
+                    continue
+                if module.weight.shape[-1] % group_size:
+                    stats["skipped_indivisible"] += 1
                     continue
                 w_hat, rot = quantize_tensor_offline(
                     module.weight.data, mode=mode, group_size=group_size,
@@ -143,6 +161,9 @@ def quantize_model_offline(  # pragma: no cover - runner-side (needs a real mode
                     if kept(full):
                         stats["skipped"] += 1
                         continue
+                    if p.shape[expert_axis] % group_size:
+                        stats["skipped_indivisible"] += 1
+                        continue
                     w_hat, rot = quantize_tensor_offline(
                         p.data, mode=mode, group_size=group_size,
                         threshold_ratio=threshold_ratio, axis=expert_axis, rotate=rotate,
@@ -157,7 +178,8 @@ def quantize_model_offline(  # pragma: no cover - runner-side (needs a real mode
             f" | {stats['linears']} linears ({stats['linear_params'] / 1e9:.2f}B params,"
             f" {stats['linears_rotated']} rotated) | {stats['experts']} expert tensors"
             f" ({stats['expert_params'] / 1e9:.2f}B params, {stats['experts_rotated']} rotated)"
-            f" | {stats['skipped']} kept",
+            f" | {stats['skipped']} kept, {stats['skipped_indivisible']} indivisible,"
+            f" {stats['skipped_vision']} vision",
             flush=True,
         )
     return stats

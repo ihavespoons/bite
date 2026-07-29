@@ -96,3 +96,63 @@ def test_dtype_and_shape_preserved():
     w = torch.randn(4, 128, dtype=torch.bfloat16)
     got, _ = quantize_tensor_offline(w, mode="int3", group_size=128, rotate=True)
     assert got.dtype == torch.bfloat16 and got.shape == w.shape
+
+
+# --- model-level walker: the real model has heterogeneous shapes and a vision tower ---
+
+
+class _Odd(torch.nn.Module):
+    """Mimics the awkward parts of the real model that killed the first offline sweep."""
+
+    def __init__(self):
+        super().__init__()
+        # names mirror the real model: the router is `...mlp.gate`, so the keep pattern
+        # `\.gate$` needs the dot — a flat `gate` attribute would not match, and did not.
+        self.self_attn = torch.nn.Module()
+        self.self_attn.q_proj = torch.nn.Linear(256, 128, bias=False)   # divisible -> quantized
+        self.self_attn.odd_proj = torch.nn.Linear(4304, 64, bias=False)  # 4304 % 128 -> skipped
+        self.mlp = torch.nn.Module()
+        self.mlp.gate = torch.nn.Linear(256, 8, bias=False)             # router -> kept
+        self.mlp.gate_up_proj = torch.nn.Parameter(torch.randn(4, 256, 128))  # (E, contract, out)
+        self.mlp.down_proj = torch.nn.Parameter(torch.randn(4, 100, 256))     # 100 % 128 -> skip
+        self.visual = torch.nn.Module()
+        self.visual.patch = torch.nn.Linear(256, 256, bias=False)       # vision -> excluded
+
+
+def test_model_walker_skips_vision_odd_shapes_and_keeps():
+    from bite.quant.offline import quantize_model_offline
+
+    torch.manual_seed(0)
+    m = _Odd()
+    before = {
+        "odd": m.self_attn.odd_proj.weight.detach().clone(),
+        "gate": m.mlp.gate.weight.detach().clone(),
+        "vis": m.visual.patch.weight.detach().clone(),
+        "q": m.self_attn.q_proj.weight.detach().clone(),
+        "down": m.mlp.down_proj.detach().clone(),
+    }
+    stats = quantize_model_offline(
+        m, mode="int4", group_size=128, keep_patterns=(r"\.gate$",), verbose=False
+    )
+
+    # quantized: q_proj + gate_up_proj
+    assert stats["linears"] == 1 and stats["experts"] == 1
+    assert not torch.equal(m.self_attn.q_proj.weight, before["q"])
+    # skipped for the right reasons, and left BIT-IDENTICAL
+    assert stats["skipped_indivisible"] == 2, stats      # odd_proj + down_proj
+    assert stats["skipped"] == 1, stats                  # router gate
+    assert stats["skipped_vision"] >= 1, stats           # visual.*
+    assert torch.equal(m.self_attn.odd_proj.weight, before["odd"])
+    assert torch.equal(m.mlp.gate.weight, before["gate"])
+    assert torch.equal(m.visual.patch.weight, before["vis"])
+    assert torch.equal(m.mlp.down_proj, before["down"])
+
+
+def test_model_walker_rotation_counts_only_power_of_two_axes():
+    from bite.quant.offline import quantize_model_offline
+
+    m = _Odd()
+    stats = quantize_model_offline(
+        m, mode="ternary", group_size=128, rotate=True, keep_patterns=(r"\.gate$",), verbose=False
+    )
+    assert stats["linears_rotated"] == 1 and stats["experts_rotated"] == 1
