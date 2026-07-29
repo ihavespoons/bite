@@ -31,7 +31,14 @@ import sys
 # so we cannot say whether the cliff sits just under 4 bits or just under 2 — which decides
 # whether a better representation could close the gap at all. intN needs no scale-rule search,
 # so PTQ init is fast (the ternary sweep's cost was dominated by the optimal rule's sort).
-BITWIDTH_# Representation experiments (offline path). Two independent levers on the SAME bit budget:
+BITWIDTH_VARIANTS: list[dict] = [
+    {"name": "int8", "why": "sanity ceiling: 8-bit should be ~lossless", "mode": "int8"},
+    {"name": "int4", "why": "the standard deployable point", "mode": "int4"},
+    {"name": "int3", "why": "where most PTQ methods start to hurt", "mode": "int3"},
+    {"name": "int2", "why": "nearest uniform neighbour of ternary (2.125 vs 1.71 bpw)", "mode": "int2"},
+]
+
+# Representation experiments (offline path). Two independent levers on the SAME bit budget:
 #  * expert grouping axis — the fake-quant path groups the fused experts' LAST dim, which is the
 #    OUTPUT axis, so one scale is shared across weights that never meet in a dot product. axis=1
 #    is the contraction axis (what llama.cpp Q*_0 and everyone else uses). Pure bug-fix, free.
