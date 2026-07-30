@@ -45,6 +45,19 @@ BITWIDTH_VARIANTS: list[dict] = [
 #  * Hadamard rotation — measured locally on synthetic weights: helps ternary on heavy-tailed
 #    sources (0.53-0.65x MSE) but is ~1.9x WORSE for int2 on sparse-spiky ones, so it is tested,
 #    not assumed. Weight MSE is only a proxy: the optimal rule cut MSE 28% and moved MMLU +1.6pt.
+# Same levers, measured at int3 instead of ternary. The ternary/int2 runs sat at chance, where
+# MMLU has NO dynamic range — those ablations could not have shown a positive effect short of a
+# total transformation, so "no change" there means UNTESTED, not ineffective. int3 retains 86.1%
+# of FP16, so a few points either way is visible. Measure where the metric can move.
+INT3_LEVER_VARIANTS: list[dict] = [
+    {"name": "int3_lastaxis", "why": "control at int3 (expect ~0.72)",
+     "offline": True, "expert_axis": -1, "mode": "int3"},
+    {"name": "int3_contraxis", "why": "expert grouping axis fix, where it is measurable",
+     "offline": True, "expert_axis": 1, "mode": "int3"},
+    {"name": "int3_contraxis_rot", "why": "axis fix + Hadamard rotation at int3",
+     "offline": True, "expert_axis": 1, "rotate": True, "mode": "int3"},
+]
+
 REPRESENTATION_VARIANTS: list[dict] = [
     {"name": "offline_ternary_lastaxis", "why": "offline control: reproduces the fake-quant policy",
      "offline": True, "expert_axis": -1},
@@ -156,7 +169,7 @@ def main() -> None:  # pragma: no cover - runner
     ap.add_argument("--model", default=None)
     ap.add_argument("--eval-tasks", default="mmlu")
     ap.add_argument("--eval-limit", type=int, default=100)
-    ap.add_argument("--set", default="sensitivity", choices=("sensitivity", "bitwidth", "representation", "all"), help="which variant family to run")
+    ap.add_argument("--set", default="sensitivity", choices=("sensitivity", "bitwidth", "representation", "int3levers", "all"), help="which variant family to run")
     ap.add_argument("--only", default="", help="comma-separated variant names to run (default: all)")
     ap.add_argument("--out", default="outputs/diag/sensitivity_sweep.json")
     ap.add_argument("--push-repo", default=None)
@@ -166,7 +179,8 @@ def main() -> None:  # pragma: no cover - runner
         "sensitivity": VARIANTS,
         "bitwidth": BITWIDTH_VARIANTS,
         "representation": REPRESENTATION_VARIANTS,
-        "all": BITWIDTH_VARIANTS + REPRESENTATION_VARIANTS + VARIANTS,
+        "int3levers": INT3_LEVER_VARIANTS,
+        "all": BITWIDTH_VARIANTS + INT3_LEVER_VARIANTS + REPRESENTATION_VARIANTS + VARIANTS,
     }
     pool = pools[args.set]
     only = {s for s in args.only.split(",") if s}
